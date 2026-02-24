@@ -46,6 +46,7 @@ export default function InspirationPanel() {
   const [currentSelection, setCurrentSelection] = useState<string[]>([]);
   const [isStyleDrawerOpen, setIsStyleDrawerOpen] = useState(false);
   const [editableCandidates, setEditableCandidates] = useState<api.InspirationAssetCandidates | null>(null);
+  const [isInputDragActive, setIsInputDragActive] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -138,13 +139,41 @@ export default function InspirationPanel() {
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files) return;
-    const incomingFiles: PendingUploadFile[] = Array.from(event.target.files).map((file, index) => ({
+    appendPendingFiles(Array.from(event.target.files));
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const appendPendingFiles = (files: File[]) => {
+    if (!files.length) return;
+    const acceptedFiles = files.filter((file) => file.type.startsWith('image/') || file.type.startsWith('video/'));
+    if (!acceptedFiles.length) {
+      addToast('仅支持拖拽图片或视频文件。', 'error');
+      return;
+    }
+    const incomingFiles: PendingUploadFile[] = acceptedFiles.map((file, index) => ({
       id: `${Date.now()}-${index}-${file.name}`,
       file,
       usageType: file.type.startsWith('image/') ? ('content_asset' as ImageUsageType) : undefined,
     }));
     setPendingFiles((previous) => [...previous, ...incomingFiles]);
-    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleInputDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (isLoading || !!draft?.locked) return;
+    setIsInputDragActive(true);
+  };
+
+  const handleInputDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsInputDragActive(false);
+  };
+
+  const handleInputDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsInputDragActive(false);
+    if (isLoading || !!draft?.locked) return;
+    appendPendingFiles(Array.from(event.dataTransfer.files || []));
   };
 
   const removePendingFile = (pendingId: string) => {
@@ -436,7 +465,13 @@ export default function InspirationPanel() {
               </div>
             )}
 
-            <div className="input-group">
+            <div
+              className={`input-group upload-dropzone ${isInputDragActive ? 'upload-dropzone-active' : ''}`}
+              onDragOver={handleInputDragOver}
+              onDragLeave={handleInputDragLeave}
+              onDrop={handleInputDrop}
+              style={{ borderRadius: '8px', padding: '8px' }}
+            >
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <input type="file" ref={fileInputRef} style={{ display: 'none' }} multiple accept="image/*,video/*" onChange={handleFileChange} />
                 <button className="btn btn-secondary" style={{ padding: '8px' }} title="添加附件" disabled={isLoading || !!draft?.locked} onClick={() => fileInputRef.current?.click()}>
@@ -456,6 +491,9 @@ export default function InspirationPanel() {
                 <button className="btn btn-primary" disabled={(!inputText.trim() && pendingFiles.length === 0) || isLoading || !!draft?.locked} onClick={() => handleSend()}>
                   发送
                 </button>
+              </div>
+              <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', paddingLeft: '4px' }}>
+                可直接拖拽图片或视频到输入区上传。
               </div>
             </div>
           </div>

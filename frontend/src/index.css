@@ -560,6 +560,16 @@ textarea.input {
   font-size: 0.9rem;
 }
 
+.upload-dropzone {
+  border: 1px dashed transparent;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.upload-dropzone-active {
+  border-color: var(--accent-color);
+  background: rgba(255, 126, 95, 0.08);
+}
+
 /* Progress Area */
 .progress-bar-container {
   height: 6px;

@@ -33,6 +33,7 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
   const [searchText, setSearchText] = useState('');
   const [sessionImages, setSessionImages] = useState<Asset[]>([]);
   const [selectedSampleImageAssetId, setSelectedSampleImageAssetId] = useState('');
+  const [isSampleDragActive, setIsSampleDragActive] = useState(false);
   const uploadImageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -135,6 +136,11 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
   const handleUploadSampleImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    await uploadSampleImageFile(file);
+    if (uploadImageInputRef.current) uploadImageInputRef.current.value = '';
+  };
+
+  const uploadSampleImageFile = async (file: File) => {
     if (!activeSessionId) {
       addToast('请先选择会话后再上传样例图。', 'error');
       return;
@@ -151,10 +157,32 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
       addToast('样例图上传成功，已自动选中。', 'success');
     } catch {
       addToast('样例图上传失败，请稍后重试。', 'error');
-    } finally {
-      if (uploadImageInputRef.current) uploadImageInputRef.current.value = '';
-      setLoading(false);
+    } finally { setLoading(false); }
+  };
+
+  const handleSampleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (loading || !activeSessionId) return;
+    setIsSampleDragActive(true);
+  };
+
+  const handleSampleDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsSampleDragActive(false);
+  };
+
+  const handleSampleDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsSampleDragActive(false);
+    if (loading || !activeSessionId) return;
+    const droppedFiles = Array.from(event.dataTransfer.files || []);
+    const imageFile = droppedFiles.find((file) => file.type.startsWith('image/'));
+    if (!imageFile) {
+      addToast('请拖拽图片文件到样例图上传区域。', 'error');
+      return;
     }
+    await uploadSampleImageFile(imageFile);
+    if (uploadImageInputRef.current) uploadImageInputRef.current.value = '';
   };
 
   const renderStyleCard = (style: StyleProfile) => (
@@ -240,14 +268,23 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
               onChange={handleUploadSampleImage}
               style={{ display: 'none' }}
             />
-            <button
-              type="button"
-              className="btn btn-secondary"
-              disabled={loading || !activeSessionId}
-              onClick={() => uploadImageInputRef.current?.click()}
+            <div
+              onDragOver={handleSampleDragOver}
+              onDragLeave={handleSampleDragLeave}
+              onDrop={handleSampleDrop}
+              className={`upload-dropzone ${isSampleDragActive ? 'upload-dropzone-active' : ''}`}
+              style={{ borderRadius: '8px' }}
             >
-              <Upload size={16} /> 上传新样例图
-            </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={loading || !activeSessionId}
+                onClick={() => uploadImageInputRef.current?.click()}
+                style={{ width: '100%' }}
+              >
+                <Upload size={16} /> 上传新样例图（支持拖拽）
+              </button>
+            </div>
             <select
               name="sample_image_asset_id"
               className="input"

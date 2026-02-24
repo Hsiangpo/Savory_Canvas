@@ -10,7 +10,28 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
 
-# 启动前先清理同端口旧进程，避免新旧版本并存
+# 启动前先清理旧 uvicorn backend 进程树，避免新旧版本并存
+$backendRootProcesses = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.Name -ieq "python.exe" -and
+        $_.CommandLine -and
+        $_.CommandLine -match "backend\.app\.main:app" -and
+        $_.CommandLine -match "uvicorn"
+    }
+
+if ($backendRootProcesses) {
+    foreach ($rootProcess in $backendRootProcesses) {
+        try {
+            Write-Host "停止旧后端进程树 PID=$($rootProcess.ProcessId) ..."
+            taskkill /PID $rootProcess.ProcessId /T /F | Out-Null
+        } catch {
+            Write-Host "停止进程树失败 PID=$($rootProcess.ProcessId)，继续尝试端口清理。"
+        }
+    }
+    Start-Sleep -Milliseconds 800
+}
+
+# 再按端口兜底清理
 $listeningConnections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 if ($listeningConnections) {
     $owningProcessIds = $listeningConnections | Select-Object -ExpandProperty OwningProcess -Unique

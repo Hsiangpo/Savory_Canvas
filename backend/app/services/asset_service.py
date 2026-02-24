@@ -90,5 +90,19 @@ class AssetService:
     def create_video_asset(self, session_id: str, file_path: str, file_name: str) -> dict[str, Any]:
         return self.transcript_service.create_video_asset(session_id, file_path, file_name)
 
+    def create_image_asset(self, session_id: str, file_path: str, file_name: str) -> dict[str, Any]:
+        if not self.session_repo.get(session_id):
+            raise not_found("会话", session_id)
+        asset = {
+            "id": new_id(),
+            "session_id": session_id,
+            "asset_type": "image",
+            "content": file_name,
+            "file_path": file_path,
+            "status": "ready",
+            "created_at": now_iso(),
+        }
+        return self.asset_repo.create(asset)
+
     def get_transcript(self, asset_id: str) -> dict[str, Any]:
         return self.transcript_service.get_transcript(asset_id)

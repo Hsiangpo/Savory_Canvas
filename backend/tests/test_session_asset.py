@@ -103,6 +103,23 @@ def test_text_asset_and_video_transcript(client):
     assert isinstance(transcript.get("text", ""), str)
 
 
+def test_image_asset_upload(client):
+    session = create_session(client, title="图片上传会话")
+
+    files = {
+        "file": ("style-sample.png", BytesIO(b"fake image bytes"), "image/png"),
+    }
+    form_data = {"session_id": session["id"]}
+    image_response = client.post("/api/v1/assets/image", data=form_data, files=files)
+    assert image_response.status_code == 201
+    image_asset = image_response.json()
+    assert image_asset["session_id"] == session["id"]
+    assert image_asset["asset_type"] == "image"
+    assert image_asset["status"] == "ready"
+    image_name = Path(image_asset["file_path"]).name
+    assert image_name.endswith(".png")
+
+
 def test_not_found_error_codes_for_session_and_asset(client):
     missing_session = client.get("/api/v1/sessions/missing-session")
     assert missing_session.status_code == 404

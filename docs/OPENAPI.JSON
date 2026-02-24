@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Savory Canvas API",
-    "version": "1.2.1",
+    "version": "1.2.2",
     "description": "Savory Canvas 本地图文生成系统接口文档"
   },
   "servers": [
@@ -353,6 +353,53 @@
         ],
         "summary": "上传视频素材",
         "operationId": "uploadVideoAsset",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "session_id",
+                  "file"
+                ],
+                "properties": {
+                  "session_id": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "上传成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Asset"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/image": {
+      "post": {
+        "tags": [
+          "Asset"
+        ],
+        "summary": "上传图片素材",
+        "operationId": "uploadImageAsset",
         "requestBody": {
           "required": true,
           "content": {

@@ -131,7 +131,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Savory Canvas API",
-        version="1.2.1",
+        version="1.2.2",
         description="Savory Canvas 本地图文生成系统接口文档",
     )
     app.add_middleware(

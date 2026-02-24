@@ -1,6 +1,6 @@
 # Savory Canvas 前端开发说明（FRONTED）
 
-- 版本：1.1.0
+- 版本：1.2.2
 - 日期：2026-02-23
 - 适用对象：前端开发工程师
 - 契约基准：`docs/OPENAPI.JSON`
@@ -122,6 +122,7 @@
   - 附件回显：`attachments[].usage_type`（图片附件可选返回）
 - 素材兼容：
   - `POST /api/v1/assets/text`
+  - `POST /api/v1/assets/image`
   - `POST /api/v1/assets/video`
   - `GET /api/v1/assets/{asset_id}/transcript`
 - 风格模板：

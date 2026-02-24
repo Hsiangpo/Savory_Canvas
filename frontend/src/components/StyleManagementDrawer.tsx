@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { X, Plus, Edit2, Trash2, CheckCircle2 } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { X, Plus, Edit2, Trash2, CheckCircle2, Upload } from 'lucide-react';
 import { useAppStore } from '../store';
 import * as api from '../api';
 import type { Asset, StyleProfile, StylePayload } from '../api';
@@ -26,40 +26,46 @@ function normalizeSearchText(style: StyleProfile): string {
 }
 
 export default function StyleManagementDrawer({ onClose, onApply }: Props) {
-  const { styleProfileList, fetchStyles, createStyle, updateStyle, deleteStyle, activeSessionId } = useAppStore();
+  const { styleProfileList, fetchStyles, createStyle, updateStyle, deleteStyle, activeSessionId, addToast } = useAppStore();
   const [editingStyle, setEditingStyle] = useState<Partial<StyleProfile> | null>(null);
   const [isFormVisible, setIsFormVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [sessionImages, setSessionImages] = useState<Asset[]>([]);
+  const [selectedSampleImageAssetId, setSelectedSampleImageAssetId] = useState('');
+  const uploadImageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     fetchStyles();
   }, [fetchStyles]);
 
+  const loadSessionImages = useCallback(async () => {
+    if (!activeSessionId) {
+      setSessionImages([]);
+      return;
+    }
+    try {
+      const detail = await api.getSessionDetail(activeSessionId);
+      const imageAssets = (detail.assets || []).filter(
+        (asset) => asset.asset_type === 'image' && asset.status === 'ready',
+      );
+      setSessionImages(imageAssets);
+    } catch {
+      setSessionImages([]);
+    }
+  }, [activeSessionId]);
+
   useEffect(() => {
     let cancelled = false;
     const loadAssets = async () => {
-      if (!activeSessionId) {
-        setSessionImages([]);
-        return;
-      }
-      try {
-        const detail = await api.getSessionDetail(activeSessionId);
-        if (cancelled) return;
-        const imageAssets = (detail.assets || []).filter(
-          (asset) => asset.asset_type === 'image' && asset.status === 'ready',
-        );
-        setSessionImages(imageAssets);
-      } catch {
-        if (!cancelled) setSessionImages([]);
-      }
+      await loadSessionImages();
+      if (cancelled) return;
     };
     loadAssets();
     return () => {
       cancelled = true;
     };
-  }, [activeSessionId]);
+  }, [loadSessionImages]);
 
   const filteredStyles = useMemo(() => {
     const keyword = searchText.trim().toLowerCase();
@@ -76,11 +82,13 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
 
   const handleEdit = (style: StyleProfile) => {
     setEditingStyle(style);
+    setSelectedSampleImageAssetId(style.style_payload?.sample_image_asset_id || '');
     setIsFormVisible(true);
   };
 
   const handleAddNew = () => {
     setEditingStyle(null);
+    setSelectedSampleImageAssetId('');
     setIsFormVisible(true);
   };
 
@@ -100,7 +108,7 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
     const stylePrompt = (form.elements.namedItem('style_prompt') as HTMLTextAreaElement).value.trim();
     const promptExample = (form.elements.namedItem('prompt_example') as HTMLTextAreaElement).value.trim();
     const extraKeywordsRaw = (form.elements.namedItem('extra_keywords') as HTMLInputElement).value;
-    const sampleImageAssetId = (form.elements.namedItem('sample_image_asset_id') as HTMLSelectElement).value || undefined;
+    const sampleImageAssetId = selectedSampleImageAssetId || undefined;
     const stylePayload: StylePayload = {
       painting_style: paintingStyle,
       color_mood: colorMood,
@@ -121,6 +129,32 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
     if (!success) return;
     setIsFormVisible(false);
     setEditingStyle(null);
+    setSelectedSampleImageAssetId('');
+  };
+
+  const handleUploadSampleImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!activeSessionId) {
+      addToast('请先选择会话后再上传样例图。', 'error');
+      return;
+    }
+    if (!file.type.startsWith('image/')) {
+      addToast('仅支持上传图片文件。', 'error');
+      return;
+    }
+    setLoading(true);
+    try {
+      const created = await api.uploadImageAsset(activeSessionId, file);
+      await loadSessionImages();
+      setSelectedSampleImageAssetId(created.id);
+      addToast('样例图上传成功，已自动选中。', 'success');
+    } catch {
+      addToast('样例图上传失败，请稍后重试。', 'error');
+    } finally {
+      if (uploadImageInputRef.current) uploadImageInputRef.current.value = '';
+      setLoading(false);
+    }
   };
 
   const renderStyleCard = (style: StyleProfile) => (
@@ -199,10 +233,26 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
             <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>额外关键词（逗号分隔）</label>
             <input name="extra_keywords" className="input" defaultValue={(editingStyle?.style_payload?.extra_keywords || []).join(', ')} />
             <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>样例图（当前会话图片）</label>
+            <input
+              ref={uploadImageInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleUploadSampleImage}
+              style={{ display: 'none' }}
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={loading || !activeSessionId}
+              onClick={() => uploadImageInputRef.current?.click()}
+            >
+              <Upload size={16} /> 上传新样例图
+            </button>
             <select
               name="sample_image_asset_id"
               className="input"
-              defaultValue={editingStyle?.style_payload?.sample_image_asset_id || ''}
+              value={selectedSampleImageAssetId}
+              onChange={(event) => setSelectedSampleImageAssetId(event.target.value)}
             >
               <option value="">不绑定样例图</option>
               {sessionImages.map((asset) => (

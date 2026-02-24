@@ -1,6 +1,6 @@
 # Savory Canvas 后端开发说明（BACKEND）
 
-- 版本：1.1.0
+- 版本：1.2.2
 - 日期：2026-02-23
 - 适用对象：后端开发工程师
 - 契约基准：`docs/OPENAPI.JSON`
@@ -90,6 +90,7 @@
 
 - `POST /api/v1/styles/chat` 保留兼容，不再作为新 UI 主入口。
 - 风格模板 CRUD 保持不变：`POST/GET/PATCH/DELETE /api/v1/styles...`
+- 素材上传补充：`POST /api/v1/assets/image` 支持直接上传样例图并返回 `Asset(image)`。
 
 ### 4.4 `GET /api/v1/jobs/{job_id}/stages`
 

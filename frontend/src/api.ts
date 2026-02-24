@@ -243,6 +243,13 @@ export const uploadVideoAsset = (sessionId: string, file: File) => {
   return api.post<Asset>('/assets/video', formData).then(res => res.data);
 };
 
+export const uploadImageAsset = (sessionId: string, file: File) => {
+  const formData = new FormData();
+  formData.append('session_id', sessionId);
+  formData.append('file', file);
+  return api.post<Asset>('/assets/image', formData).then(res => res.data);
+};
+
 export const createTextAsset = (data: { session_id: string, asset_type: string, content: string }) => api.post<Asset>('/assets/text', data).then(res => res.data);
 
 export const getTranscript = (assetId: string) => api.get(`/assets/${assetId}/transcript`).then(res => res.data);

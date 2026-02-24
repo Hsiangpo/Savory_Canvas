@@ -25,6 +25,14 @@ python -m uvicorn backend.app.main:app --app-dir . --host 127.0.0.1 --port 8887 
 
 说明：PowerShell 下不要使用 `--app-dir $root`，应使用 `--app-dir .` 或绝对路径。
 
+推荐使用自动清理旧进程脚本（Windows PowerShell）：
+
+```powershell
+.\scripts\start_backend.ps1
+```
+
+该脚本会先按端口自动停止旧后端进程，再启动新进程，避免新旧版本同时监听 `8887`。
+
 ### 2) 启动前端
 
 ```bash

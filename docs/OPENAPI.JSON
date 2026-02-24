@@ -1,0 +1,2435 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Savory Canvas API",
+    "version": "1.2.1",
+    "description": "Savory Canvas 本地图文生成系统接口文档"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8887",
+      "description": "本地开发环境"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Session",
+      "description": "会话管理"
+    },
+    {
+      "name": "Inspiration",
+      "description": "灵感对话"
+    },
+    {
+      "name": "Asset",
+      "description": "素材与转写"
+    },
+    {
+      "name": "Style",
+      "description": "风格管理"
+    },
+    {
+      "name": "Generation",
+      "description": "图文生成"
+    },
+    {
+      "name": "Export",
+      "description": "导出管理"
+    },
+    {
+      "name": "Provider",
+      "description": "提供商管理"
+    },
+    {
+      "name": "Model",
+      "description": "模型管理"
+    }
+  ],
+  "paths": {
+    "/api/v1/sessions": {
+      "post": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "创建会话",
+        "operationId": "createSession",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "会话列表",
+        "operationId": "listSessions",
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionListResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "会话详情",
+        "operationId": "getSessionDetail",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDetailResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "重命名会话",
+        "operationId": "updateSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "更新成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "删除会话",
+        "operationId": "deleteSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "删除成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/inspirations/{session_id}": {
+      "get": {
+        "tags": [
+          "Inspiration"
+        ],
+        "summary": "获取灵感对话上下文",
+        "operationId": "getInspirationConversation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspirationConversationResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/inspirations/messages": {
+      "post": {
+        "tags": [
+          "Inspiration"
+        ],
+        "summary": "发送灵感对话消息（支持文本/图片/视频混合）",
+        "operationId": "postInspirationMessage",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "session_id"
+                ],
+                "properties": {
+                  "session_id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "selected_items": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "continue",
+                      "confirm_prompt",
+                      "confirm_assets",
+                      "revise_assets",
+                      "use_style_profile",
+                      "save_style",
+                      "skip_save"
+                    ]
+                  },
+                  "image_usages": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "style_reference",
+                        "content_asset"
+                      ]
+                    },
+                    "description": "与 images 按顺序对应的图片用途标签。未提供时默认 content_asset。"
+                  },
+                  "images": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    }
+                  },
+                  "videos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "处理成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspirationConversationResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/text": {
+      "post": {
+        "tags": [
+          "Asset"
+        ],
+        "summary": "提交文本素材",
+        "operationId": "createTextAsset",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetTextCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "提交成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Asset"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/video": {
+      "post": {
+        "tags": [
+          "Asset"
+        ],
+        "summary": "上传视频素材",
+        "operationId": "uploadVideoAsset",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "session_id",
+                  "file"
+                ],
+                "properties": {
+                  "session_id": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "上传成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Asset"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/{asset_id}/transcript": {
+      "get": {
+        "tags": [
+          "Asset"
+        ],
+        "summary": "转写结果",
+        "operationId": "getTranscript",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AssetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/styles/chat": {
+      "post": {
+        "tags": [
+          "Style"
+        ],
+        "summary": "风格对话",
+        "operationId": "styleChat",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StyleChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "返回选项",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StyleChatResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/styles": {
+      "post": {
+        "tags": [
+          "Style"
+        ],
+        "summary": "保存风格模板",
+        "operationId": "createStyleProfile",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StyleProfileCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StyleProfile"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Style"
+        ],
+        "summary": "风格列表",
+        "operationId": "listStyleProfiles",
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StyleProfileListResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/styles/{style_id}": {
+      "patch": {
+        "tags": [
+          "Style"
+        ],
+        "summary": "更新风格",
+        "operationId": "updateStyleProfile",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StyleId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StyleProfileUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "更新成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StyleProfile"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Style"
+        ],
+        "summary": "删除风格",
+        "operationId": "deleteStyleProfile",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StyleId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "删除成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/generate": {
+      "post": {
+        "tags": [
+          "Generation"
+        ],
+        "summary": "创建生成任务",
+        "operationId": "createGenerationJob",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerationJobCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "任务已创建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerationJob"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "Generation"
+        ],
+        "summary": "任务状态",
+        "operationId": "getGenerationJob",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerationJob"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}/stages": {
+      "get": {
+        "tags": [
+          "Generation"
+        ],
+        "summary": "任务阶段轨迹",
+        "operationId": "getGenerationJobStages",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerationStageListResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}/asset-breakdown": {
+      "get": {
+        "tags": [
+          "Generation"
+        ],
+        "summary": "任务资产拆解结果",
+        "operationId": "getGenerationJobAssetBreakdown",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAssetBreakdownResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}/results": {
+      "get": {
+        "tags": [
+          "Generation"
+        ],
+        "summary": "任务结果",
+        "operationId": "getGenerationResult",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}/cancel": {
+      "post": {
+        "tags": [
+          "Generation"
+        ],
+        "summary": "取消生成任务",
+        "operationId": "cancelGenerationJob",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobId"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "已提交取消请求",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerationJob"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/exports": {
+      "post": {
+        "tags": [
+          "Export"
+        ],
+        "summary": "创建导出任务",
+        "operationId": "createExportTask",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportTaskCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "导出任务已创建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportTask"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/exports/{export_id}": {
+      "get": {
+        "tags": [
+          "Export"
+        ],
+        "summary": "导出任务状态",
+        "operationId": "getExportTask",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ExportId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportTask"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/providers": {
+      "get": {
+        "tags": [
+          "Provider"
+        ],
+        "summary": "提供商列表",
+        "operationId": "listProviders",
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderListResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Provider"
+        ],
+        "summary": "新增提供商",
+        "operationId": "createProvider",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Provider"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/providers/{provider_id}": {
+      "patch": {
+        "tags": [
+          "Provider"
+        ],
+        "summary": "更新提供商",
+        "operationId": "updateProvider",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProviderId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "更新成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Provider"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Provider"
+        ],
+        "summary": "删除提供商",
+        "operationId": "deleteProvider",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProviderId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "删除成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/models": {
+      "get": {
+        "tags": [
+          "Model"
+        ],
+        "summary": "模型列表",
+        "operationId": "listModels",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "提供商 ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelListResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
+    "/api/v1/config/model-routing": {
+      "get": {
+        "tags": [
+          "Model"
+        ],
+        "summary": "获取当前模型路由",
+        "operationId": "getModelRouting",
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ModelRoutingConfig"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Model"
+        ],
+        "summary": "设置模型路由",
+        "operationId": "updateModelRouting",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelRoutingUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "设置成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRoutingConfig"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "SessionId": {
+        "name": "session_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "AssetId": {
+        "name": "asset_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "StyleId": {
+        "name": "style_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "JobId": {
+        "name": "job_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ExportId": {
+        "name": "export_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ProviderId": {
+        "name": "provider_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "ErrorResponse": {
+        "description": "错误响应",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "code",
+                "message"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "SessionCreateRequest": {
+        "type": "object",
+        "required": [
+          "title",
+          "content_mode"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "content_mode": {
+            "type": "string",
+            "enum": [
+              "food",
+              "scenic",
+              "food_scenic"
+            ]
+          }
+        }
+      },
+      "SessionUpdateRequest": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "content_mode",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "content_mode": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SessionListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          }
+        }
+      },
+      "SessionDetailResponse": {
+        "type": "object",
+        "required": [
+          "session",
+          "assets",
+          "jobs",
+          "exports"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Asset"
+            }
+          },
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GenerationJob"
+            }
+          },
+          "exports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExportTask"
+            }
+          }
+        }
+      },
+      "AssetTextCreateRequest": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "asset_type",
+          "content"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "asset_type": {
+            "type": "string",
+            "enum": [
+              "food_name",
+              "scenic_name",
+              "text"
+            ]
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "Asset": {
+        "type": "object",
+        "required": [
+          "id",
+          "session_id",
+          "asset_type",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "asset_type": {
+            "type": "string",
+            "enum": [
+              "food_name",
+              "scenic_name",
+              "text",
+              "image",
+              "video",
+              "transcript"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "processing",
+              "failed"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "InspirationAttachment": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "asset_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "image",
+              "video",
+              "text",
+              "transcript"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "preview_url": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "processing",
+              "failed"
+            ]
+          },
+          "usage_type": {
+            "type": "string",
+            "enum": [
+              "style_reference",
+              "content_asset"
+            ],
+            "description": "图片用途标签。image 类型附件可选返回。"
+          }
+        }
+      },
+      "InspirationAssetCandidates": {
+        "type": "object",
+        "properties": {
+          "foods": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scenes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source_asset_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      },
+      "InspirationStyleContext": {
+        "type": "object",
+        "properties": {
+          "style_profile_id": {
+            "type": "string"
+          },
+          "style_name": {
+            "type": "string"
+          },
+          "sample_image_asset_id": {
+            "type": "string"
+          },
+          "sample_image_preview_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "style_payload": {
+            "$ref": "#/components/schemas/StylePayload"
+          }
+        }
+      },
+      "InspirationMessage": {
+        "type": "object",
+        "required": [
+          "id",
+          "role",
+          "content",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "assistant",
+              "user",
+              "system"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StyleOptionBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fallback_used": {
+            "type": "boolean"
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InspirationAttachment"
+            }
+          },
+          "asset_candidates": {
+            "$ref": "#/components/schemas/InspirationAssetCandidates"
+          },
+          "style_context": {
+            "$ref": "#/components/schemas/InspirationStyleContext"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "InspirationDraft": {
+        "type": "object",
+        "required": [
+          "stage",
+          "locked"
+        ],
+        "properties": {
+          "stage": {
+            "type": "string",
+            "enum": [
+              "style_collecting",
+              "prompt_revision",
+              "asset_confirming",
+              "locked"
+            ]
+          },
+          "style_payload": {
+            "$ref": "#/components/schemas/StylePayload"
+          },
+          "image_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "draft_style_id": {
+            "type": "string"
+          },
+          "locked": {
+            "type": "boolean"
+          }
+        }
+      },
+      "InspirationConversationResponse": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "messages",
+          "draft"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InspirationMessage"
+            }
+          },
+          "draft": {
+            "$ref": "#/components/schemas/InspirationDraft"
+          }
+        }
+      },
+      "TranscriptResult": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "status"
+        ],
+        "properties": {
+          "asset_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "processing",
+              "ready",
+              "failed"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "StyleChatRequest": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "stage",
+          "user_reply"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "init",
+              "painting_style",
+              "background_decor",
+              "color_mood",
+              "image_count"
+            ]
+          },
+          "user_reply": {
+            "type": "string"
+          },
+          "selected_items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "StyleOptionBlock": {
+        "type": "object",
+        "required": [
+          "title",
+          "items",
+          "max"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "max": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "StyleChatResponse": {
+        "type": "object",
+        "required": [
+          "reply",
+          "options",
+          "stage",
+          "next_stage",
+          "is_finished",
+          "fallback_used"
+        ],
+        "properties": {
+          "reply": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/StyleOptionBlock"
+          },
+          "stage": {
+            "type": "string"
+          },
+          "next_stage": {
+            "type": "string"
+          },
+          "is_finished": {
+            "type": "boolean"
+          },
+          "fallback_used": {
+            "type": "boolean"
+          }
+        }
+      },
+      "StylePayload": {
+        "type": "object",
+        "required": [
+          "painting_style",
+          "color_mood",
+          "prompt_example",
+          "style_prompt",
+          "extra_keywords"
+        ],
+        "properties": {
+          "painting_style": {
+            "type": "string"
+          },
+          "color_mood": {
+            "type": "string"
+          },
+          "prompt_example": {
+            "type": "string"
+          },
+          "style_prompt": {
+            "type": "string"
+          },
+          "sample_image_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "extra_keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "StyleProfileCreateRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "style_payload"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "style_payload": {
+            "$ref": "#/components/schemas/StylePayload"
+          }
+        }
+      },
+      "StyleProfileUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "style_payload": {
+            "$ref": "#/components/schemas/StylePayload"
+          }
+        }
+      },
+      "StyleProfile": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "style_payload",
+          "is_builtin",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "style_payload": {
+            "$ref": "#/components/schemas/StylePayload"
+          },
+          "sample_image_preview_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "is_builtin": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "StyleProfileListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StyleProfile"
+            }
+          }
+        }
+      },
+      "GenerationJobCreateRequest": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "style_profile_id",
+          "image_count"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "style_profile_id": {
+            "type": "string"
+          },
+          "image_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          }
+        }
+      },
+      "GenerationJob": {
+        "type": "object",
+        "required": [
+          "id",
+          "session_id",
+          "status",
+          "progress_percent",
+          "current_stage",
+          "stage_message",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "style_profile_id": {
+            "type": "string"
+          },
+          "image_count": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "partial_success",
+              "success",
+              "failed",
+              "canceled"
+            ]
+          },
+          "progress_percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "current_stage": {
+            "type": "string",
+            "enum": [
+              "asset_extract",
+              "asset_allocate",
+              "prompt_generate",
+              "image_generate",
+              "copy_generate",
+              "finalize"
+            ]
+          },
+          "stage_message": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "error_message": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "JobStage": {
+        "type": "object",
+        "required": [
+          "stage",
+          "status",
+          "stage_message",
+          "created_at"
+        ],
+        "properties": {
+          "stage": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stage_message": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "JobStageListResponse": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "items"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobStage"
+            }
+          }
+        }
+      },
+      "SourceAssetRef": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "asset_type",
+          "content"
+        ],
+        "properties": {
+          "asset_id": {
+            "type": "string"
+          },
+          "asset_type": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "ExtractedAssets": {
+        "type": "object",
+        "properties": {
+          "foods": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scenes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "JobAssetBreakdownResponse": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "session_id",
+          "content_mode",
+          "source_assets",
+          "extracted",
+          "created_at"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "content_mode": {
+            "type": "string",
+            "enum": [
+              "food",
+              "scenic",
+              "food_scenic"
+            ]
+          },
+          "source_assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssetBreakdownSourceAsset"
+            }
+          },
+          "extracted": {
+            "$ref": "#/components/schemas/AssetBreakdownExtracted"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ImageResult": {
+        "type": "object",
+        "required": [
+          "image_index",
+          "prompt_text",
+          "image_url"
+        ],
+        "properties": {
+          "image_index": {
+            "type": "integer"
+          },
+          "asset_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "prompt_text": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "前端可直接访问的 http/https 图片 URL"
+          }
+        }
+      },
+      "CopySection": {
+        "type": "object",
+        "required": [
+          "heading",
+          "content"
+        ],
+        "properties": {
+          "heading": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "CopyResult": {
+        "type": "object",
+        "required": [
+          "title",
+          "intro",
+          "guide_sections",
+          "ending",
+          "full_text"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "intro": {
+            "type": "string"
+          },
+          "guide_sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CopySection"
+            }
+          },
+          "ending": {
+            "type": "string"
+          },
+          "full_text": {
+            "type": "string"
+          }
+        }
+      },
+      "GenerationResult": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "status",
+          "images",
+          "copy"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImageResult"
+            }
+          },
+          "copy": {
+            "$ref": "#/components/schemas/CopyResult"
+          }
+        }
+      },
+      "ExportTaskCreateRequest": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "job_id",
+          "export_format"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "export_format": {
+            "type": "string",
+            "enum": [
+              "long_image",
+              "pdf"
+            ]
+          }
+        }
+      },
+      "ExportTask": {
+        "type": "object",
+        "required": [
+          "id",
+          "session_id",
+          "job_id",
+          "export_format",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "export_format": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "success",
+              "failed"
+            ]
+          },
+          "file_url": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "error_message": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ProviderCreateRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "base_url",
+          "api_key",
+          "api_protocol"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "api_key": {
+            "type": "string"
+          },
+          "api_protocol": {
+            "type": "string",
+            "enum": [
+              "responses",
+              "chat_completions"
+            ]
+          }
+        }
+      },
+      "ProviderUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "api_key": {
+            "type": "string"
+          },
+          "api_protocol": {
+            "type": "string",
+            "enum": [
+              "responses",
+              "chat_completions"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Provider": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "base_url",
+          "api_protocol",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "api_key_masked": {
+            "type": "string"
+          },
+          "api_protocol": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ProviderListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Provider"
+            }
+          }
+        }
+      },
+      "ModelInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "capabilities"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "image_generation",
+                "text_generation",
+                "vision"
+              ]
+            }
+          }
+        }
+      },
+      "ModelListResponse": {
+        "type": "object",
+        "required": [
+          "provider_id",
+          "items"
+        ],
+        "properties": {
+          "provider_id": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelInfo"
+            }
+          }
+        }
+      },
+      "ModelReference": {
+        "type": "object",
+        "required": [
+          "provider_id",
+          "model_name"
+        ],
+        "properties": {
+          "provider_id": {
+            "type": "string"
+          },
+          "model_name": {
+            "type": "string"
+          }
+        }
+      },
+      "ModelRoutingUpdateRequest": {
+        "type": "object",
+        "required": [
+          "image_model",
+          "text_model"
+        ],
+        "properties": {
+          "image_model": {
+            "$ref": "#/components/schemas/ModelReference"
+          },
+          "text_model": {
+            "$ref": "#/components/schemas/ModelReference"
+          }
+        }
+      },
+      "ModelRoutingConfig": {
+        "type": "object",
+        "required": [
+          "image_model",
+          "text_model",
+          "updated_at"
+        ],
+        "properties": {
+          "image_model": {
+            "$ref": "#/components/schemas/ModelReference"
+          },
+          "text_model": {
+            "$ref": "#/components/schemas/ModelReference"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "DeleteResponse": {
+        "type": "object",
+        "required": [
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GenerationStageItem": {
+        "type": "object",
+        "required": [
+          "stage",
+          "status",
+          "stage_message",
+          "created_at"
+        ],
+        "properties": {
+          "stage": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stage_message": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "GenerationStageListResponse": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "items"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GenerationStageItem"
+            }
+          }
+        }
+      },
+      "AssetBreakdownSourceAsset": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "asset_type"
+        ],
+        "properties": {
+          "asset_id": {
+            "type": "string"
+          },
+          "asset_type": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "AssetBreakdownExtracted": {
+        "type": "object",
+        "required": [
+          "foods",
+          "scenes",
+          "keywords"
+        ],
+        "properties": {
+          "foods": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scenes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

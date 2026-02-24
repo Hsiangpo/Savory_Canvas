@@ -1,0 +1,225 @@
+import { useState } from 'react';
+import { Copy, Image as ImageIcon, FileText, Component, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
+import { useAppStore } from '../store';
+import type { ImageResult } from '../api';
+
+function ResultImage({ img }: { img: ImageResult }) {
+  const [errorUrl, setErrorUrl] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const isError = errorUrl === img.image_url && retryCount > 0;
+
+  const handleRetry = () => {
+    setErrorUrl(null);
+    setRetryCount(prev => prev + 1);
+  };
+
+  // Add cache busting on retries using retryCount as stable param
+  const imgSrc = retryCount > 0
+    ? `${img.image_url}${img.image_url.includes('?') ? '&' : '?'}_retry=${retryCount}`
+    : img.image_url;
+
+  return (
+    <div className="result-image-box">
+      {isError ? (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: '8px', padding: '16px' }}>
+          <div style={{ textAlign: 'center', color: 'var(--error)', fontSize: '0.85rem' }}>
+            图片加载失败，请检查网络或后端日志
+          </div>
+          <button 
+            className="btn btn-ghost" 
+            onClick={handleRetry}
+            style={{ fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--accent-color)' }}
+          >
+            <RefreshCw size={14} /> 重试加载
+          </button>
+        </div>
+      ) : (
+        <img 
+          src={imgSrc} 
+          alt={img.prompt_text} 
+          className="result-image" 
+          title={img.prompt_text} 
+          onError={() => {
+            if (retryCount === 0) {
+              // First failure: auto-retry once with cache busting
+              setRetryCount(1);
+            } else {
+              // Second failure: show error state
+              setErrorUrl(img.image_url);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+export default function ResultPanel() {
+  const { latestJob, latestResult, latestAssetBreakdown, addToast, draft } = useAppStore();
+  const [copyExpanded, setCopyExpanded] = useState(true);
+
+  const isRunning = latestJob?.status === 'running' || latestJob?.status === 'queued';
+  const isSuccess = latestJob?.status === 'success' || latestJob?.status === 'partial_success';
+  const isPartialSuccess = latestJob?.status === 'partial_success';
+
+  const copyToClipboard = async () => {
+    if (latestResult?.copy?.full_text) {
+      try {
+        await navigator.clipboard.writeText(latestResult.copy.full_text);
+        addToast('已复制到剪贴板', 'success');
+      } catch (err) {
+        console.error('Failed to copy', err);
+      }
+    }
+  };
+
+  const hasCopy = latestResult?.copy && (latestResult.copy.title || latestResult.copy.intro || latestResult.copy.full_text);
+  const hasSections = (latestResult?.copy?.guide_sections?.length ?? 0) > 0;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div className="panel-header">
+        <h2 className="panel-title">
+          <ImageIcon size={20} color="var(--accent-color)" /> 生成结果预览
+        </h2>
+        {isSuccess && (
+          <button className="btn btn-secondary btn-icon" title="一键复制文案" onClick={copyToClipboard}>
+            <Copy size={16} />
+          </button>
+        )}
+      </div>
+
+      <div className="panel-content">
+        {!isRunning && !isSuccess && (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
+            暂无结果，请调整配置后点击生成
+          </div>
+        )}
+
+        {isRunning && (
+          <>
+            <div className="result-grid">
+              <div className="result-image-box">
+                <div className="result-skeleton"></div>
+              </div>
+              <div className="result-image-box">
+                <div className="result-skeleton" style={{ animationDelay: '0.2s' }}></div>
+              </div>
+              <div className="result-image-box">
+                <div className="result-skeleton" style={{ animationDelay: '0.4s' }}></div>
+              </div>
+              <div className="result-image-box">
+                <div className="result-skeleton" style={{ animationDelay: '0.6s' }}></div>
+              </div>
+            </div>
+            
+            <div style={{ marginTop: '16px' }}>
+              <div style={{ height: '24px', width: '60%', borderRadius: '4px', marginBottom: '12px' }} className="result-skeleton"></div>
+              <div style={{ height: '16px', width: '100%', borderRadius: '4px', marginBottom: '8px' }} className="result-skeleton"></div>
+              <div style={{ height: '16px', width: '80%', borderRadius: '4px', marginBottom: '8px' }} className="result-skeleton"></div>
+            </div>
+          </>
+        )}
+
+        {isSuccess && latestResult && (
+          <>
+            {isPartialSuccess && (
+              <div style={{ marginBottom: '16px', padding: '12px', borderRadius: '8px', backgroundColor: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.2)', color: 'var(--text-primary)', fontSize: '0.9rem' }}>
+                <strong style={{ color: 'var(--accent-color)' }}>部分成功：</strong>
+                已生成 {latestResult.images?.length || 0}/{draft?.image_count ?? '-'} 张图。上游失败导致部分缺失。
+              </div>
+            )}
+
+            {latestAssetBreakdown && (
+              <div className="asset-breakdown" style={{ marginBottom: '16px', padding: '14px', backgroundColor: 'var(--bg-glass-hover)', borderRadius: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', color: 'var(--text-primary)' }}>
+                   <Component size={16} color="var(--accent-color)" />
+                   <h3 style={{ margin: 0, fontSize: '1rem' }}>素材拆解结果</h3>
+                </div>
+                {(!latestAssetBreakdown.extracted?.foods?.length && !latestAssetBreakdown.extracted?.scenes?.length && !latestAssetBreakdown.extracted?.keywords?.length) ? (
+                  <div style={{ color: 'var(--text-muted)' }}>暂无拆解结果</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {(latestAssetBreakdown.extracted?.foods?.length ?? 0) > 0 && (
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                        <strong style={{ color: 'var(--text-secondary)', minWidth: '50px', fontSize: '0.85rem' }}>美食:</strong>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                           {latestAssetBreakdown.extracted?.foods?.map((food, i) => (
+                             <span key={i} className="tag-badge">{food}</span>
+                           ))}
+                        </div>
+                      </div>
+                    )}
+                    {(latestAssetBreakdown.extracted?.scenes?.length ?? 0) > 0 && (
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                        <strong style={{ color: 'var(--text-secondary)', minWidth: '50px', fontSize: '0.85rem' }}>场景:</strong>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                           {latestAssetBreakdown.extracted?.scenes?.map((scene, i) => (
+                             <span key={i} className="tag-badge">{scene}</span>
+                           ))}
+                        </div>
+                      </div>
+                    )}
+                    {(latestAssetBreakdown.extracted?.keywords?.length ?? 0) > 0 && (
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                        <strong style={{ color: 'var(--text-secondary)', minWidth: '50px', fontSize: '0.85rem' }}>关键词:</strong>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                           {latestAssetBreakdown.extracted?.keywords?.map((kw, i) => (
+                             <span key={i} className="tag-badge">{kw}</span>
+                           ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {hasCopy && (
+              <div className="copy-section" style={{ marginBottom: '16px' }}>
+                <button className="copy-section-header" onClick={() => setCopyExpanded(!copyExpanded)}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <FileText size={16} color="var(--accent-color)" />
+                    <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-primary)' }}>{latestResult.copy?.title || '文案结果'}</h3>
+                  </div>
+                  {copyExpanded ? <ChevronUp size={16} color="var(--text-secondary)" /> : <ChevronDown size={16} color="var(--text-secondary)" />}
+                </button>
+
+                {copyExpanded && (
+                  <div className="copy-section-body">
+                    {latestResult.copy?.intro && (
+                      <div className="copy-block">
+                        <span className="copy-label">导语</span>
+                        <p className="copy-paragraph">{latestResult.copy.intro}</p>
+                      </div>
+                    )}
+
+                    {hasSections && latestResult.copy?.guide_sections?.map((sec, i) => (
+                      <div key={i} className="copy-block">
+                        <span className="copy-label">{sec.heading}</span>
+                        <p className="copy-paragraph">{sec.content}</p>
+                      </div>
+                    ))}
+
+                    {latestResult.copy?.ending && (
+                      <div className="copy-block" style={{ borderLeft: '3px solid var(--accent-color)', paddingLeft: '12px' }}>
+                        <span className="copy-label">结语</span>
+                        <p className="copy-paragraph" style={{ fontStyle: 'italic', opacity: 0.9 }}>{latestResult.copy.ending}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="result-grid" style={{ marginBottom: '16px' }}>
+              {latestResult.images?.map((img, i) => (
+                <ResultImage key={`${img.image_url}-${img.image_index ?? i}`} img={img} />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

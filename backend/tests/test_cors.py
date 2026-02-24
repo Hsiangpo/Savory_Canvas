@@ -20,3 +20,12 @@ def test_cors_get_sessions_with_origin(client):
     )
     assert response.status_code == 200
     assert response.headers.get("access-control-allow-origin") == "http://localhost:7778"
+
+
+def test_cors_get_sessions_with_other_localhost_port(client):
+    response = client.get(
+        "/api/v1/sessions",
+        headers={"Origin": "http://localhost:5173"},
+    )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"

@@ -41,6 +41,29 @@ export default function SessionPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!dropdownOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-session-dropdown-root="true"]')) {
+        return;
+      }
+      setDropdownOpen(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setDropdownOpen(null);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [dropdownOpen]);
+
   const handleCreateConfirm = () => {
     if (newTitle.trim()) {
       createSession(newTitle, 'food');
@@ -65,14 +88,17 @@ export default function SessionPanel() {
           <div 
             key={s.id}
             className={`session-item ${activeSessionId === s.id ? 'active' : ''}`}
-            onClick={() => setActiveSessionId(s.id)}
+            onClick={() => {
+              setDropdownOpen(null);
+              setActiveSessionId(s.id);
+            }}
           >
             <MessageCircle className="session-icon" />
             <div style={{ flex: 1, overflow: 'hidden' }}>
               <div style={{ fontWeight: 500, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{s.title}</div>
               <div style={{ fontSize: '0.75rem', opacity: 0.6, marginTop: '2px' }}>{new Date(s.created_at).toLocaleDateString()}</div>
             </div>
-            <div style={{ position: 'relative' }}>
+            <div style={{ position: 'relative' }} data-session-dropdown-root="true">
               <button className="btn btn-icon" style={{ padding: '4px' }} onClick={(e) => { e.stopPropagation(); setDropdownOpen(s.id === dropdownOpen ? null : s.id); }}>
                 <MoreVertical size={16} />
               </button>

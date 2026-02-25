@@ -113,68 +113,47 @@ class GenerationWorker(GenerationPipelineMixin):
 
             if self._is_canceled(job_id):
                 return
-            self._advance(job_id, "running", 60, "image_generate", "正在生成图片")
-            created_images, failed_images, last_error_message = await self._generate_images(
-                job=job,
-                prompt_specs=prompt_specs,
-                source_assets=assets,
-                style=style,
-                image_provider=image_provider,
+            allow_image_reference = self._supports_image_reference(
                 image_model_name=image_model_name,
-                allow_image_reference=self._supports_image_reference(
-                    image_model_name=image_model_name,
-                    capabilities=image_model_capabilities,
-                ),
+                capabilities=image_model_capabilities,
             )
-            if not created_images:
-                self._fail(job_id, "E-1004", last_error_message or "图片生成失败")
-                return
-            if failed_images > 0:
-                image_stage_message = "图片生成完成，部分图片失败"
-            else:
-                image_stage_message = "图片生成完成"
-            self._complete_stage(job_id, progress=80, stage="image_generate", stage_message=image_stage_message)
-
-            if self._is_canceled(job_id):
-                return
-            copy_error_message: str | None = None
-            self._advance(job_id, "running", 82, "copy_generate", "正在生成文案结构")
-            try:
-                copy_result = self._generate_copy_result(
+            planned_images = self._build_planned_copy_images(prompt_specs)
+            image_task = asyncio.create_task(
+                self._run_image_generate_stage(
+                    job=job,
+                    prompt_specs=prompt_specs,
+                    source_assets=assets,
+                    style=style,
+                    image_provider=image_provider,
+                    image_model_name=image_model_name,
+                    allow_image_reference=allow_image_reference,
+                )
+            )
+            copy_task = asyncio.create_task(
+                self._run_copy_generate_stage(
                     job=job,
                     style=style,
-                    images=created_images,
+                    planned_images=planned_images,
                     content_mode=content_mode,
                     breakdown=breakdown,
                 )
-                self._advance(job_id, "running", 90, "copy_generate", "正在润色文案表达")
-                self.result_repo.upsert_copy(copy_result)
-                self._complete_stage(job_id, progress=92, stage="copy_generate", stage_message="文案生成完成")
-            except DomainError as error:
-                copy_error_message = error.message
-                logger.warning("文案生成失败，保留已产出的图片结果: job_id=%s reason=%s", job_id, error.message)
-                self.result_repo.upsert_copy(
-                    {
-                        "id": new_id(),
-                        "job_id": job_id,
-                        "title": "",
-                        "intro": "",
-                        "guide_sections": [],
-                        "ending": "",
-                        "full_text": "",
-                        "created_at": now_iso(),
-                    }
-                )
-                self._advance(
-                    job_id,
-                    "running",
-                    92,
-                    "copy_generate",
-                    "文案生成失败，已保留图片结果",
-                    error_code=error.code,
-                    error_message=error.message,
-                    log_status="failed",
-                )
+            )
+            image_outcome, copy_outcome = await asyncio.gather(image_task, copy_task, return_exceptions=True)
+
+            if isinstance(image_outcome, Exception):
+                if isinstance(image_outcome, DomainError):
+                    self._fail(job_id, image_outcome.code, image_outcome.message)
+                else:
+                    self._fail(job_id, "E-1099", "生成流程异常")
+                return
+            created_images, failed_images = image_outcome
+
+            copy_error_message: str | None = None
+            if isinstance(copy_outcome, Exception):
+                logger.exception("文案并行任务异常: job_id=%s", job_id)
+                copy_error_message = "文案生成失败：系统内部错误"
+            else:
+                copy_error_message = copy_outcome
 
             if self._is_canceled(job_id):
                 return
@@ -200,6 +179,97 @@ class GenerationWorker(GenerationPipelineMixin):
             self._fail(job_id, error.code, error.message)
         except Exception:
             self._fail(job_id, "E-1099", "生成流程异常")
+
+    def _build_planned_copy_images(self, prompt_specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        planned_images: list[dict[str, Any]] = []
+        for index, spec in enumerate(prompt_specs, start=1):
+            planned_images.append(
+                {
+                    "image_index": index,
+                    "prompt_text": str(spec.get("prompt_text") or "").strip(),
+                    "asset_refs": list(spec.get("asset_refs") or []),
+                }
+            )
+        return planned_images
+
+    async def _run_image_generate_stage(
+        self,
+        *,
+        job: dict[str, Any],
+        prompt_specs: list[dict[str, Any]],
+        source_assets: list[dict[str, Any]],
+        style: dict[str, Any],
+        image_provider: dict[str, Any],
+        image_model_name: str,
+        allow_image_reference: bool,
+    ) -> tuple[list[dict[str, Any]], int]:
+        self._advance(job["id"], "running", 60, "image_generate", "正在生成图片")
+        created_images, failed_images, last_error_message = await self._generate_images(
+            job=job,
+            prompt_specs=prompt_specs,
+            source_assets=source_assets,
+            style=style,
+            image_provider=image_provider,
+            image_model_name=image_model_name,
+            allow_image_reference=allow_image_reference,
+        )
+        if not created_images:
+            raise DomainError(code="E-1004", message=last_error_message or "图片生成失败", status_code=400)
+        if failed_images > 0:
+            stage_message = "图片生成完成，部分图片失败"
+        else:
+            stage_message = "图片生成完成"
+        self._complete_stage(job["id"], progress=86, stage="image_generate", stage_message=stage_message)
+        return created_images, failed_images
+
+    async def _run_copy_generate_stage(
+        self,
+        *,
+        job: dict[str, Any],
+        style: dict[str, Any],
+        planned_images: list[dict[str, Any]],
+        content_mode: str,
+        breakdown: dict[str, Any],
+    ) -> str | None:
+        self._advance(job["id"], "running", 62, "copy_generate", "正在生成文案结构")
+        await asyncio.sleep(0)
+        try:
+            copy_result = self._generate_copy_result(
+                job=job,
+                style=style,
+                images=planned_images,
+                content_mode=content_mode,
+                breakdown=breakdown,
+            )
+            self._advance(job["id"], "running", 88, "copy_generate", "正在润色文案表达")
+            self.result_repo.upsert_copy(copy_result)
+            self._complete_stage(job["id"], progress=92, stage="copy_generate", stage_message="文案生成完成")
+            return None
+        except DomainError as error:
+            logger.warning("文案生成失败，保留已产出的图片结果: job_id=%s reason=%s", job["id"], error.message)
+            self.result_repo.upsert_copy(
+                {
+                    "id": new_id(),
+                    "job_id": job["id"],
+                    "title": "",
+                    "intro": "",
+                    "guide_sections": [],
+                    "ending": "",
+                    "full_text": "",
+                    "created_at": now_iso(),
+                }
+            )
+            self._advance(
+                job["id"],
+                "running",
+                92,
+                "copy_generate",
+                "文案生成失败，已保留图片结果",
+                error_code=error.code,
+                error_message=error.message,
+                log_status="failed",
+            )
+            return error.message
 
     def _require_job(self, job_id: str) -> dict[str, Any]:
         job = self.job_repo.get(job_id)

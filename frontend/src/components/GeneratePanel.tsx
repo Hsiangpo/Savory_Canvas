@@ -4,12 +4,10 @@ import { useEffect, useState, useMemo } from 'react';
 import * as api from '../api';
 
 const STAGE_NAME_MAP: Record<string, string> = {
-  asset_extract: '素材提取',
-  asset_allocate: '内容分配',
-  prompt_generate: '提示词生成',
+  plan_ready: '方案加载',
   image_generate: '图片生成',
   copy_generate: '文案生成',
-  finalize: '结果整理',
+  finalize: '完成',
 };
 
 const CN_ORDINALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
@@ -56,6 +54,13 @@ function splitImagePrompts(stylePrompt: string, expectedCount?: number): string[
   return [normalized];
 }
 
+function normalizeStageName(stageName: string): string {
+  if (stageName === 'asset_extract' || stageName === 'asset_allocate' || stageName === 'prompt_generate') {
+    return 'plan_ready';
+  }
+  return stageName;
+}
+
 export default function GeneratePanel() {
   const { latestJob, startJob, cancelJob, pollJobStatus, activeSessionId, addToast, draft, latestStages, isStartingJob, latestAssetBreakdown } = useAppStore();
   const [stagesExpanded, setStagesExpanded] = useState(true);
@@ -81,14 +86,16 @@ export default function GeneratePanel() {
     const groups: { stage: string; latest: StageItem; history: StageItem[] }[] = [];
     
     for (const s of latestStages) {
-      const existingGrp = groups.find(g => g.stage === s.stage);
+      const normalizedStage = normalizeStageName(s.stage);
+      const stageItem = { ...s, stage: normalizedStage };
+      const existingGrp = groups.find(g => g.stage === normalizedStage);
       if (existingGrp) {
         existingGrp.history.push(existingGrp.latest);
-        existingGrp.latest = s;
+        existingGrp.latest = stageItem;
       } else {
         groups.push({
-          stage: s.stage,
-          latest: s,
+          stage: normalizedStage,
+          latest: stageItem,
           history: []
         });
       }

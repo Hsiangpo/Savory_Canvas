@@ -38,8 +38,18 @@ def _insert_image_asset(client, session_id: str, file_name: str = "style-sample.
     )
 
 
-def test_style_chat_and_profile_crud(client):
+def test_style_chat_and_profile_crud(client, monkeypatch):
+    setup_model_routing(client)
     session = create_session(client)
+    from backend.app.services.style_service import StyleService
+
+    monkeypatch.setattr(
+        StyleService,
+        "_call_text_model",
+        lambda *_args, **_kwargs: (
+            '{"reply":"已生成候选项","options":{"title":"请选择绘画风格","items":["油画厚涂","电影写实"],"max":2}}'
+        ),
+    )
 
     init_resp = client.post(
         "/api/v1/styles/chat",
@@ -102,6 +112,38 @@ def test_style_chat_and_profile_crud(client):
     delete_resp = client.delete(f"/api/v1/styles/{profile['id']}")
     assert delete_resp.status_code == 200
     assert delete_resp.json()["deleted"] is True
+
+
+def test_style_profile_preview_kept_when_sample_asset_row_missing(client):
+    session = create_session(client)
+    sample_asset = _insert_image_asset(client, session["id"], "cached-style.png")
+    create_resp = client.post(
+        "/api/v1/styles",
+        json={
+            "session_id": None,
+            "name": "缓存样例图风格",
+            "style_payload": {
+                "painting_style": "手绘插画",
+                "color_mood": "暖米黄色",
+                "prompt_example": "保持手账拼贴风格。",
+                "style_prompt": "保持手账拼贴风格。",
+                "sample_image_asset_id": sample_asset["id"],
+                "extra_keywords": ["拼贴", "纸纹"],
+            },
+        },
+    )
+    assert create_resp.status_code == 201
+    created = create_resp.json()
+    assert created["sample_image_preview_url"]
+
+    style_repo = client.app.state.services.style.style_repo
+    style_repo.db.execute("DELETE FROM asset WHERE id = ?", (sample_asset["id"],))
+
+    list_resp = client.get("/api/v1/styles")
+    assert list_resp.status_code == 200
+    matched = next(item for item in list_resp.json()["items"] if item["id"] == created["id"])
+    assert matched["sample_image_preview_url"]
+    assert matched["sample_image_preview_url"].startswith("http://127.0.0.1:8887/static/images/")
 
 
 def test_style_chat_dynamic_options_change_with_input(client, monkeypatch):
@@ -173,11 +215,10 @@ def test_style_chat_fallback_when_model_output_invalid_json(client, monkeypatch)
             "selected_items": [],
         },
     )
-    assert response.status_code == 200
+    assert response.status_code == 503
     body = response.json()
-    assert body["fallback_used"] is True
-    assert "降级" in body["reply"] or "默认" in body["reply"]
-    assert len(body["options"]["items"]) >= 1
+    assert body["code"] == "E-1004"
+    assert "模型服务连接失败" in body["message"] or "模型输出格式异常" in body["message"]
 
 
 def test_style_chat_fallback_when_model_unavailable(client):
@@ -191,11 +232,10 @@ def test_style_chat_fallback_when_model_unavailable(client):
             "selected_items": [],
         },
     )
-    assert response.status_code == 200
+    assert response.status_code == 503
     body = response.json()
-    assert body["fallback_used"] is True
-    assert "降级" in body["reply"] or "默认" in body["reply"]
-    assert body["stage"] == "painting_style"
+    assert body["code"] == "E-1004"
+    assert "模型服务连接失败" in body["message"]
 
 
 def test_style_chat_progress_to_next_stage_for_multi_select(client, monkeypatch):
@@ -226,6 +266,47 @@ def test_style_chat_progress_to_next_stage_for_multi_select(client, monkeypatch)
     assert body["fallback_used"] is False
     assert body["stage"] == "background_decor"
     assert body["next_stage"] == "color_mood"
+
+
+def test_style_chat_supports_candidate_text_payload(client, monkeypatch):
+    setup_model_routing(client)
+    session = create_session(client)
+
+    from backend.app.services.style_service import StyleService
+
+    def fake_post_json(_self, _url, _payload, _api_key):
+        return {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "text": (
+                                    '{"reply":"已按候选结构生成建议",'
+                                    '"options":{"title":"请选择绘画风格","items":["水彩晕染","电影写实"],"max":2}}'
+                                )
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(StyleService, "_post_json", fake_post_json)
+    response = client.post(
+        "/api/v1/styles/chat",
+        json={
+            "session_id": session["id"],
+            "stage": "painting_style",
+            "user_reply": "我想要旅行手账风格",
+            "selected_items": [],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["fallback_used"] is False
+    assert body["reply"] == "已按候选结构生成建议"
+    assert "水彩晕染" in body["options"]["items"]
 
 
 def test_style_chat_protocol_fallback_to_chat_completions_success(client, monkeypatch):
@@ -285,8 +366,8 @@ def test_style_chat_protocol_fallback_when_responses_returns_500_not_implemented
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    def fake_urlopen(upstream_request, timeout=20):
-        assert timeout == 20
+    def fake_urlopen(upstream_request, timeout=35):
+        assert timeout == 35
         target_url = upstream_request.full_url
         if target_url.endswith("/responses"):
             failure_body = (
@@ -388,10 +469,10 @@ def test_style_chat_fallback_after_both_protocols_failed(client, monkeypatch, ca
             "selected_items": [],
         },
     )
-    assert response.status_code == 200
+    assert response.status_code == 503
     body = response.json()
-    assert body["fallback_used"] is True
-    assert "风格对话降级" in caplog.text
+    assert body["code"] == "E-1004"
+    assert "风格对话失败" in caplog.text
     assert "protocol_both_failed" in caplog.text
 
 
@@ -518,7 +599,7 @@ def test_style_profile_accepts_image_sample_asset_and_returns_preview_url(client
     assert body["sample_image_preview_url"].startswith("http://127.0.0.1:8887/static/images/")
 
 
-def test_style_profile_update_rejects_cross_session_sample_asset(client):
+def test_style_profile_update_accepts_cross_session_sample_asset(client):
     session_a = create_session(client, title="样例图会话A")
     session_b = create_session(client, title="样例图会话B")
     style = create_style(client, session_a["id"], {"painting_style": "电影写实"})
@@ -537,6 +618,8 @@ def test_style_profile_update_rejects_cross_session_sample_asset(client):
             }
         },
     )
-    assert update_response.status_code == 400
-    assert update_response.json()["message"] == "样例图必须属于当前会话"
+    assert update_response.status_code == 200
+    body = update_response.json()
+    assert body["style_payload"]["sample_image_asset_id"] == foreign_image["id"]
+    assert body["sample_image_preview_url"].startswith("http://127.0.0.1:8887/static/images/")
 

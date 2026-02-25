@@ -1,7 +1,10 @@
 import axios from 'axios';
 
+export const API_BASE_URL = 'http://127.0.0.1:8887/api/v1';
+export const STATIC_BASE_URL = API_BASE_URL.replace(/\/api\/v1\/?$/, '');
+
 const api = axios.create({
-  baseURL: 'http://127.0.0.1:8887/api/v1',
+  baseURL: API_BASE_URL,
 });
 
 // --- Interfaces ---
@@ -56,7 +59,6 @@ export interface InspirationAttachment {
   name?: string;
   preview_url?: string;
   status: 'ready' | 'processing' | 'failed';
-  usage_type?: 'style_reference' | 'content_asset';
 }
 
 export interface StylePayload {
@@ -101,7 +103,20 @@ export interface InspirationDraft {
   style_payload?: StylePayload | Record<string, unknown>;
   image_count?: number;
   draft_style_id?: string;
+  allocation_plan?: InspirationAllocationPlanItem[];
   locked: boolean;
+}
+
+export interface InspirationAllocationPlanItem {
+  slot_index: number;
+  focus_title: string;
+  focus_description: string;
+  locations?: string[];
+  scenes?: string[];
+  foods?: string[];
+  keywords?: string[];
+  source_asset_ids?: string[];
+  confirmed?: boolean;
 }
 
 export interface InspirationConversationResponse {
@@ -263,7 +278,6 @@ export const postInspirationMessage = (data: {
   text?: string,
   selected_items?: string[],
   action?: string,
-  image_usages?: ('style_reference' | 'content_asset')[],
   images?: File[],
   videos?: File[]
 }) => {
@@ -276,9 +290,6 @@ export const postInspirationMessage = (data: {
   }
   if (data.images) {
     data.images.forEach(i => formData.append('images', i));
-  }
-  if (data.image_usages) {
-    data.image_usages.forEach(usage => formData.append('image_usages', usage));
   }
   if (data.videos) {
     data.videos.forEach(v => formData.append('videos', v));

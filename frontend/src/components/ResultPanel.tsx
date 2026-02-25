@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Copy, Image as ImageIcon, FileText, Component, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAppStore } from '../store';
 import type { ImageResult } from '../api';
 
-function ResultImage({ img }: { img: ImageResult }) {
+function ResultImage(
+  { img, onPreview }: { img: ImageResult; onPreview: (url: string, title?: string) => void },
+) {
   const [errorUrl, setErrorUrl] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   const isError = errorUrl === img.image_url && retryCount > 0;
@@ -39,6 +41,8 @@ function ResultImage({ img }: { img: ImageResult }) {
           alt={img.prompt_text} 
           className="result-image" 
           title={img.prompt_text} 
+          style={{ cursor: 'zoom-in' }}
+          onClick={() => onPreview(imgSrc, img.prompt_text || `生成图 ${img.image_index}`)}
           onError={() => {
             if (retryCount === 0) {
               // First failure: auto-retry once with cache busting
@@ -55,8 +59,10 @@ function ResultImage({ img }: { img: ImageResult }) {
 }
 
 export default function ResultPanel() {
-  const { latestJob, latestResult, latestAssetBreakdown, addToast, draft } = useAppStore();
+  const { latestJob, latestResult, latestAssetBreakdown, latestStages, addToast, draft } = useAppStore();
   const [copyExpanded, setCopyExpanded] = useState(true);
+  const [previewModal, setPreviewModal] = useState<{ url: string; title?: string } | null>(null);
+  const [previewLoadFailed, setPreviewLoadFailed] = useState(false);
 
   const isRunning = latestJob?.status === 'running' || latestJob?.status === 'queued';
   const isSuccess = latestJob?.status === 'success' || latestJob?.status === 'partial_success';
@@ -75,6 +81,28 @@ export default function ResultPanel() {
 
   const hasCopy = latestResult?.copy && (latestResult.copy.title || latestResult.copy.intro || latestResult.copy.full_text);
   const hasSections = (latestResult?.copy?.guide_sections?.length ?? 0) > 0;
+  const copyFailureReason = useMemo(() => {
+    if (latestJob?.error_message && latestJob.error_message.includes('文案生成失败')) {
+      return latestJob.error_message;
+    }
+    const copyStageItems = (latestStages || []).filter((stage) => stage.stage === 'copy_generate');
+    if (!copyStageItems.length) return '';
+    const latestCopy = copyStageItems[copyStageItems.length - 1];
+    if (latestCopy.status === 'failed') return latestCopy.stage_message || '文案生成失败';
+    return '';
+  }, [latestJob?.error_message, latestStages]);
+
+  useEffect(() => {
+    if (!previewModal) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setPreviewModal(null);
+        setPreviewLoadFailed(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [previewModal]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -175,51 +203,117 @@ export default function ResultPanel() {
               </div>
             )}
 
-            {hasCopy && (
-              <div className="copy-section" style={{ marginBottom: '16px' }}>
+            <div className="copy-section" style={{ marginBottom: '16px' }}>
                 <button className="copy-section-header" onClick={() => setCopyExpanded(!copyExpanded)}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <FileText size={16} color="var(--accent-color)" />
-                    <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-primary)' }}>{latestResult.copy?.title || '文案结果'}</h3>
+                    <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-primary)' }}>
+                      {latestResult.copy?.title || '文案结果'}
+                    </h3>
                   </div>
                   {copyExpanded ? <ChevronUp size={16} color="var(--text-secondary)" /> : <ChevronDown size={16} color="var(--text-secondary)" />}
                 </button>
 
                 {copyExpanded && (
                   <div className="copy-section-body">
-                    {latestResult.copy?.intro && (
+                    {hasCopy && latestResult.copy?.intro && (
                       <div className="copy-block">
                         <span className="copy-label">导语</span>
                         <p className="copy-paragraph">{latestResult.copy.intro}</p>
                       </div>
                     )}
 
-                    {hasSections && latestResult.copy?.guide_sections?.map((sec, i) => (
+                    {hasCopy && hasSections && latestResult.copy?.guide_sections?.map((sec, i) => (
                       <div key={i} className="copy-block">
                         <span className="copy-label">{sec.heading}</span>
                         <p className="copy-paragraph">{sec.content}</p>
                       </div>
                     ))}
 
-                    {latestResult.copy?.ending && (
+                    {hasCopy && latestResult.copy?.ending && (
                       <div className="copy-block" style={{ borderLeft: '3px solid var(--accent-color)', paddingLeft: '12px' }}>
                         <span className="copy-label">结语</span>
                         <p className="copy-paragraph" style={{ fontStyle: 'italic', opacity: 0.9 }}>{latestResult.copy.ending}</p>
                       </div>
                     )}
+
+                    {!hasCopy && (
+                      <div style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
+                        {copyFailureReason ? (
+                          <div style={{ color: 'var(--error)' }}>
+                            文案生成失败：{copyFailureReason}。当前已保留图片结果，可先使用图片。
+                          </div>
+                        ) : (
+                          <div style={{ color: 'var(--text-muted)' }}>
+                            文案暂未生成，请稍后重试或重新发起任务。
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
-            )}
 
             <div className="result-grid" style={{ marginBottom: '16px' }}>
               {latestResult.images?.map((img, i) => (
-                <ResultImage key={`${img.image_url}-${img.image_index ?? i}`} img={img} />
+                <ResultImage
+                  key={`${img.image_url}-${img.image_index ?? i}`}
+                  img={img}
+                  onPreview={(url, title) => {
+                    setPreviewLoadFailed(false);
+                    setPreviewModal({ url, title });
+                  }}
+                />
               ))}
             </div>
           </>
         )}
       </div>
+
+      {previewModal && (
+        <div
+          className="modal-overlay"
+          style={{ zIndex: 130 }}
+          onClick={() => {
+            setPreviewModal(null);
+            setPreviewLoadFailed(false);
+          }}
+        >
+          <div
+            className="modal-content"
+            style={{ maxWidth: 'min(92vw, 1200px)', maxHeight: '92vh', padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+              <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {previewModal.title || '图片预览'}
+              </div>
+              <button
+                className="btn btn-secondary"
+                style={{ padding: '4px 10px' }}
+                onClick={() => {
+                  setPreviewModal(null);
+                  setPreviewLoadFailed(false);
+                }}
+              >
+                关闭
+              </button>
+            </div>
+            <div style={{ flex: 1, minHeight: '280px', maxHeight: 'calc(92vh - 90px)', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.28)', borderRadius: '8px', border: '1px solid var(--border-color)', overflow: 'hidden' }}>
+              {previewLoadFailed ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>大图加载失败，请重试。</div>
+              ) : (
+                <img
+                  src={previewModal.url}
+                  alt={previewModal.title || '图片预览'}
+                  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                  onError={() => setPreviewLoadFailed(true)}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -148,7 +148,6 @@ export default function StyleChatPanel() {
                   <>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: 'var(--text-secondary)' }}>
                       <Bot size={16} /> Savory Assistant
-                      {msg.fallbackUsed && <span style={{ fontSize: '0.75rem', color: '#fbbf24', background: 'rgba(245, 158, 11, 0.1)', padding: '2px 6px', borderRadius: '4px' }}>已启用默认选项</span>}
                     </div>
                     {msg.text}
                     {msg.options && msg.options.items?.length > 0 && (

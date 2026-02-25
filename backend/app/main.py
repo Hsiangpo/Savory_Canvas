@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -36,8 +40,90 @@ from backend.app.workers.export_worker import ExportWorker
 from backend.app.workers.generation_worker import GenerationWorker
 from backend.app.workers.transcript_worker import TranscriptWorker
 
+_AUTO_CLEAN_DONE = False
+
+
+def _maybe_cleanup_old_backend_processes() -> None:
+    global _AUTO_CLEAN_DONE
+    if _AUTO_CLEAN_DONE:
+        return
+    _AUTO_CLEAN_DONE = True
+    if os.name != "nt":
+        return
+    if os.getenv("SAVORY_CANVAS_AUTOCLEAN_ENABLED", "1") != "1":
+        return
+    command_line = " ".join(sys.argv).lower()
+    if "uvicorn" not in command_line or "backend.app.main:app" not in command_line:
+        return
+    port = _extract_cli_port(default_port=8000)
+    protected_pids = _get_protected_pids()
+    _kill_port_listeners(port, protected_pids)
+
+
+def _extract_cli_port(default_port: int) -> int:
+    for index, arg in enumerate(sys.argv):
+        if arg == "--port" and index + 1 < len(sys.argv):
+            try:
+                return int(sys.argv[index + 1])
+            except ValueError:
+                return default_port
+        if arg.startswith("--port="):
+            try:
+                return int(arg.split("=", 1)[1])
+            except ValueError:
+                return default_port
+    return default_port
+
+
+def _get_protected_pids() -> set[int]:
+    protected = {os.getpid()}
+    parent_pid = os.getppid()
+    if parent_pid > 0:
+        protected.add(parent_pid)
+    return protected
+
+
+def _kill_port_listeners(port: int, protected_pids: set[int]) -> None:
+    try:
+        output = subprocess.check_output(
+            ["netstat", "-ano", "-p", "tcp"],
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    listener_pids: set[int] = set()
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or "LISTENING" not in text:
+            continue
+        parts = text.split()
+        if len(parts) < 5:
+            continue
+        local_address = parts[1]
+        status = parts[3]
+        pid_text = parts[4]
+        if status != "LISTENING" or not pid_text.isdigit():
+            continue
+        if not local_address.endswith(f":{port}"):
+            continue
+        process_id = int(pid_text)
+        if process_id not in protected_pids:
+            listener_pids.add(process_id)
+    for process_id in listener_pids:
+        subprocess.run(
+            ["taskkill", "/PID", str(process_id), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    if listener_pids:
+        time.sleep(0.4)
+
 
 def create_app() -> FastAPI:
+    _maybe_cleanup_old_backend_processes()
     settings = load_settings()
 
     database = Database(settings.db_path)

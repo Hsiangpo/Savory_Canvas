@@ -13,7 +13,7 @@ class InspirationRepository:
         row = self.db.fetch_one(
             """
             SELECT session_id, stage, style_stage, is_locked AS locked, image_count, style_prompt,
-                   style_payload, asset_candidates, draft_style_id, transcript_seen_ids, updated_at
+                   style_payload, asset_candidates, allocation_plan, draft_style_id, requirement_ready, transcript_seen_ids, updated_at
             FROM inspiration_state
             WHERE session_id = ?
             """,
@@ -26,9 +26,9 @@ class InspirationRepository:
             """
             INSERT INTO inspiration_state (
                 session_id, stage, style_stage, is_locked, image_count, style_prompt,
-                style_payload, asset_candidates, draft_style_id, transcript_seen_ids, updated_at
+                style_payload, asset_candidates, allocation_plan, draft_style_id, requirement_ready, transcript_seen_ids, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 stage=excluded.stage,
                 style_stage=excluded.style_stage,
@@ -37,7 +37,9 @@ class InspirationRepository:
                 style_prompt=excluded.style_prompt,
                 style_payload=excluded.style_payload,
                 asset_candidates=excluded.asset_candidates,
+                allocation_plan=excluded.allocation_plan,
                 draft_style_id=excluded.draft_style_id,
+                requirement_ready=excluded.requirement_ready,
                 transcript_seen_ids=excluded.transcript_seen_ids,
                 updated_at=excluded.updated_at
             """,
@@ -50,7 +52,9 @@ class InspirationRepository:
                 state.get("style_prompt"),
                 json_dumps(state.get("style_payload", {})),
                 json_dumps(state.get("asset_candidates", {})),
+                json_dumps(state.get("allocation_plan", [])),
                 state.get("draft_style_id"),
+                1 if state.get("requirement_ready", True) else 0,
                 json_dumps(state.get("transcript_seen_ids", [])),
                 state["updated_at"],
             ),
@@ -95,8 +99,10 @@ class InspirationRepository:
 
     def _deserialize_state(self, row: dict[str, Any]) -> dict[str, Any]:
         row["locked"] = bool(row["locked"])
+        row["requirement_ready"] = bool(row.get("requirement_ready", 1))
         row["style_payload"] = json_loads(row.get("style_payload"), default={})
         row["asset_candidates"] = json_loads(row.get("asset_candidates"), default={})
+        row["allocation_plan"] = json_loads(row.get("allocation_plan"), default=[])
         row["transcript_seen_ids"] = json_loads(row.get("transcript_seen_ids"), default=[])
         return row
 

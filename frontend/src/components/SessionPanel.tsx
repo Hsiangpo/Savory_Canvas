@@ -1,4 +1,4 @@
-import { MessageSquarePlus, MessageCircle, MoreVertical } from 'lucide-react';
+import { MessageCircle, MoreVertical } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useState, useEffect } from 'react';
 import * as api from '../api';
@@ -51,12 +51,9 @@ export default function SessionPanel() {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <div className="panel-header">
         <h2 className="panel-title">会话列表</h2>
-        <button className="btn btn-icon" onClick={() => setShowCreateModal(true)}>
-          <MessageSquarePlus size={20} />
-        </button>
       </div>
       
       <div className="panel-content" style={{ gap: '8px' }}>

@@ -258,7 +258,9 @@
                     "enum": [
                       "continue",
                       "confirm_prompt",
+                      "confirm_allocation_plan",
                       "confirm_assets",
+                      "revise_allocation_plan",
                       "revise_assets",
                       "use_style_profile",
                       "save_style",
@@ -1501,6 +1503,61 @@
           }
         }
       },
+      "InspirationAllocationPlanItem": {
+        "type": "object",
+        "required": [
+          "slot_index",
+          "focus_title",
+          "focus_description",
+          "confirmed"
+        ],
+        "properties": {
+          "slot_index": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "focus_title": {
+            "type": "string"
+          },
+          "focus_description": {
+            "type": "string"
+          },
+          "locations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scenes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "foods": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source_asset_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "confirmed": {
+            "type": "boolean"
+          }
+        }
+      },
       "InspirationDraft": {
         "type": "object",
         "required": [
@@ -1527,6 +1584,12 @@
           },
           "draft_style_id": {
             "type": "string"
+          },
+          "allocation_plan": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InspirationAllocationPlanItem"
+            }
           },
           "locked": {
             "type": "boolean"

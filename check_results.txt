@@ -1,0 +1,5 @@
+❌ 门禁检查未通过！发现以下超限问题：
+
+  - E:\Develop\Masterpiece\Agent\Savory_Canvas\backend\app\workers\generation_worker.py: 行数超限 (1468 >= 1000)
+
+请拆分文件或重构代码，禁止删除健壮性代码来凑行数！

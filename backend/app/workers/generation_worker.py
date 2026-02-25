@@ -4,11 +4,9 @@ import asyncio
 import base64
 import json
 import logging
-import re
 import threading
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 from urllib import error as url_error
 from urllib import request
 
@@ -23,9 +21,30 @@ from backend.app.repositories.session_repo import SessionRepository
 from backend.app.repositories.style_repo import StyleRepository
 from backend.app.services.model_service import ModelService
 
-FOOD_MARKERS = ("饭", "面", "汤", "鸡", "鸭", "鱼", "虾", "蟹", "肉", "牛", "羊", "猪", "茶", "咖啡", "甜点")
-SCENE_MARKERS = ("海", "山", "寺", "街", "夜景", "日落", "晨光", "窗", "餐桌", "厨房", "花园", "湖", "森林")
-NON_VISUAL_STYLE_KEYS = {"image_count", "style_prompt", "force_partial_fail", "draft_style_id"}
+NON_VISUAL_STYLE_KEYS = {"image_count", "style_prompt", "force_partial_fail", "draft_style_id", "allocation_plan"}
+ASSET_EXTRACT_SYSTEM_PROMPT = (
+    "你是资产提取助手。请从输入中提取本次创作资产，输出严格 JSON："
+    '{"locations":[""],"scenes":[""],"foods":[""],"keywords":[""],"confidence":0.0}。'
+    "要求："
+    "1) locations 只放地点（城市/区域）；"
+    "2) scenes 只放景点地标；"
+    "3) foods 只放食物饮品；"
+    "4) keywords 仅保留与地点/景点/食物强相关词；"
+    "5) 去重并过滤空值；"
+    "6) 不要输出风格词和画法词；"
+    "7) 只输出 JSON，不要 Markdown，不要解释。"
+)
+PROMPT_PLAN_SYSTEM_PROMPT = (
+    "你是生图提示词规划助手。请根据风格、资产和目标张数输出严格 JSON："
+    '{"items":[{"prompt_text":"", "asset_refs":["asset_id"]}]}。'
+    "要求："
+    "1) items 数量必须等于目标张数；"
+    "2) 每个 prompt_text 只能描述一张图，禁止拼贴和多画面合成；"
+    "3) 各图主体与叙事重点要有差异，但风格、色彩与质感必须统一；"
+    "4) 每条 prompt_text 必须包含主体、场景、构图、镜头、光线、氛围与细节约束；"
+    "5) asset_refs 只允许填写输入素材中的 asset_id，且至少 1 个；"
+    "6) 只输出 JSON，不要 Markdown，不要解释。"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +75,7 @@ class GenerationWorker:
         self.session_repo = session_repo
         self.model_service = model_service
         self.storage = storage
+        self._text_protocol_overrides: dict[str, str] = {}
 
     def schedule(self, job_id: str) -> None:
         threading.Thread(target=lambda: asyncio.run(self._run(job_id)), daemon=True).start()
@@ -123,27 +143,55 @@ class GenerationWorker:
 
             if self._is_canceled(job_id):
                 return
+            copy_error_message: str | None = None
             self._advance(job_id, "running", 82, "copy_generate", "正在生成文案结构")
-            copy_result = self._generate_copy_result(
-                job=job,
-                style=style,
-                images=created_images,
-                content_mode=content_mode,
-                breakdown=breakdown,
-            )
-            self._advance(job_id, "running", 90, "copy_generate", "正在润色文案表达")
-            self.result_repo.upsert_copy(copy_result)
-            self._complete_stage(job_id, progress=92, stage="copy_generate", stage_message="文案生成完成")
+            try:
+                copy_result = self._generate_copy_result(
+                    job=job,
+                    style=style,
+                    images=created_images,
+                    content_mode=content_mode,
+                    breakdown=breakdown,
+                )
+                self._advance(job_id, "running", 90, "copy_generate", "正在润色文案表达")
+                self.result_repo.upsert_copy(copy_result)
+                self._complete_stage(job_id, progress=92, stage="copy_generate", stage_message="文案生成完成")
+            except DomainError as error:
+                copy_error_message = error.message
+                logger.warning("文案生成失败，保留已产出的图片结果: job_id=%s reason=%s", job_id, error.message)
+                self.result_repo.upsert_copy(
+                    {
+                        "id": new_id(),
+                        "job_id": job_id,
+                        "title": "",
+                        "intro": "",
+                        "guide_sections": [],
+                        "ending": "",
+                        "full_text": "",
+                        "created_at": now_iso(),
+                    }
+                )
+                self._advance(
+                    job_id,
+                    "running",
+                    92,
+                    "copy_generate",
+                    "文案生成失败，已保留图片结果",
+                    error_code=error.code,
+                    error_message=error.message,
+                    log_status="failed",
+                )
 
             if self._is_canceled(job_id):
                 return
             self._advance(job_id, "running", 95, "finalize", "正在整理结果")
-            if failed_images > 0:
+            if failed_images > 0 or copy_error_message:
+                partial_error_message = copy_error_message or "部分图片生成失败"
                 self._finish(
                     job_id,
                     status="partial_success",
                     error_code="E-1004",
-                    error_message="部分图片生成失败",
+                    error_message=partial_error_message,
                     stage_message="任务完成，部分结果可用",
                 )
             else:
@@ -217,41 +265,149 @@ class GenerationWorker:
             }
             for asset in assets
         ]
-        foods: list[str] = []
-        scenes: list[str] = []
-        keywords: list[str] = []
-        for source in source_assets:
-            text = (source.get("content") or "").strip()
-            if not text:
-                continue
-            self._append_unique(keywords, self._split_tokens(text))
-            asset_type = source["asset_type"]
-            if asset_type == "food_name":
-                self._append_unique(foods, [text])
-            elif asset_type == "scenic_name":
-                self._append_unique(scenes, [text])
-            elif asset_type in {"text", "transcript"}:
-                token_foods, token_scenes = self._classify_tokens(self._split_tokens(text))
-                self._append_unique(foods, token_foods)
-                self._append_unique(scenes, token_scenes)
-
-        if not foods and content_mode in {"food", "food_scenic"}:
-            self._append_unique(foods, keywords[:2])
-        if not scenes and content_mode in {"scenic", "food_scenic"}:
-            self._append_unique(scenes, keywords[:2])
+        extracted = self._resolve_asset_extraction(
+            session_id=job["session_id"],
+            source_assets=source_assets,
+            content_mode=content_mode,
+        )
 
         return {
             "job_id": job["id"],
             "session_id": job["session_id"],
             "content_mode": content_mode,
             "source_assets": source_assets,
-            "extracted": {
-                "foods": foods[:10],
-                "scenes": scenes[:10],
-                "keywords": keywords[:15],
-            },
+            "extracted": extracted,
             "created_at": now_iso(),
         }
+
+    def _resolve_asset_extraction(
+        self,
+        *,
+        session_id: str,
+        source_assets: list[dict[str, Any]],
+        content_mode: str,
+    ) -> dict[str, list[str]]:
+        state = self.inspiration_repo.get_state(session_id) or {}
+        candidates = state.get("asset_candidates") if isinstance(state.get("asset_candidates"), dict) else {}
+        candidate_foods = self._normalize_asset_values(candidates.get("foods") if isinstance(candidates, dict) else [])
+        candidate_scenes = self._normalize_asset_values(candidates.get("scenes") if isinstance(candidates, dict) else [])
+        candidate_keywords = self._normalize_asset_values(candidates.get("keywords") if isinstance(candidates, dict) else [])
+        if candidate_foods or candidate_scenes or candidate_keywords:
+            return {
+                "foods": candidate_foods[:10],
+                "scenes": candidate_scenes[:10],
+                "keywords": candidate_keywords[:15],
+            }
+        return self._extract_assets_with_llm(
+            session_id=session_id,
+            source_assets=source_assets,
+            content_mode=content_mode,
+        )
+
+    def _extract_assets_with_llm(
+        self,
+        *,
+        session_id: str,
+        source_assets: list[dict[str, Any]],
+        content_mode: str,
+    ) -> dict[str, list[str]]:
+        context_text = self._build_asset_extract_user_prompt(source_assets=source_assets, content_mode=content_mode)
+        provider, model_name = self._resolve_text_model_provider()
+        try:
+            raw_text = self._call_text_model_for_copy(
+                provider=provider,
+                model_name=model_name,
+                system_prompt=ASSET_EXTRACT_SYSTEM_PROMPT,
+                user_prompt=context_text,
+            )
+            payload = self._parse_asset_extract_payload(raw_text)
+        except CopyModelError as error:
+            raise DomainError(
+                code="E-1004",
+                message=f"资产提取失败：{error.detail}",
+                status_code=503,
+            ) from error
+        except (ValueError, TypeError, json.JSONDecodeError) as error:
+            raise DomainError(
+                code="E-1004",
+                message="资产提取失败：模型返回格式异常，请重试",
+                status_code=503,
+            ) from error
+
+        locations = self._normalize_asset_values(payload.get("locations"))
+        scenes = self._merge_unique_values(self._normalize_asset_values(payload.get("scenes")), locations)
+        foods = self._normalize_asset_values(payload.get("foods"))
+        keywords = self._merge_unique_values(
+            self._normalize_asset_values(payload.get("keywords")),
+            locations + scenes + foods,
+        )
+        if not foods and content_mode in {"food", "food_scenic"}:
+            raise DomainError(code="E-1004", message="资产提取失败：缺少可用食物信息，请补充需求后重试", status_code=400)
+        if not scenes and content_mode in {"scenic", "food_scenic"}:
+            raise DomainError(code="E-1004", message="资产提取失败：缺少可用景点信息，请补充需求后重试", status_code=400)
+        if not keywords:
+            keywords = self._merge_unique_values([], foods + scenes)
+        return {
+            "foods": foods[:10],
+            "scenes": scenes[:10],
+            "keywords": keywords[:15],
+        }
+
+    def _build_asset_extract_user_prompt(
+        self,
+        *,
+        source_assets: list[dict[str, Any]],
+        content_mode: str,
+    ) -> str:
+        lines = [f"内容模式：{content_mode}", "素材输入："]
+        for asset in source_assets:
+            asset_type = str(asset.get("asset_type") or "").strip()
+            content = str(asset.get("content") or "").strip()
+            if not asset_type or not content:
+                continue
+            lines.append(f"- {asset_type}: {content}")
+        if len(lines) <= 2:
+            raise DomainError(code="E-1003", message="素材不足，无法提取资产", status_code=400)
+        lines.append("请严格输出 JSON，不要解释。")
+        return "\n".join(lines)
+
+    def _parse_asset_extract_payload(self, model_text: str) -> dict[str, Any]:
+        text = model_text.strip()
+        if text.startswith("```"):
+            lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            raise ValueError("资产提取响应缺少 JSON 对象")
+        payload = json.loads(text[start : end + 1])
+        if not isinstance(payload, dict):
+            raise ValueError("资产提取响应结构非法")
+        return payload
+
+    def _normalize_asset_values(self, values: Any) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value).strip()
+            if len(text) < 2 or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
+        return normalized
+
+    def _merge_unique_values(self, base_values: list[str], extra_values: list[str]) -> list[str]:
+        merged = list(base_values)
+        seen = set(base_values)
+        for value in extra_values:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+        return merged
 
     def _build_prompt_specs(
         self,
@@ -260,34 +416,204 @@ class GenerationWorker:
         style: dict[str, Any],
         content_mode: str,
     ) -> list[dict[str, Any]]:
-        style_description = self._format_style_payload(style.get("style_payload") or {})
-        extracted = breakdown.get("extracted") or {}
-        foods = extracted.get("foods") or []
-        scenes = extracted.get("scenes") or []
-        keywords = extracted.get("keywords") or []
-        asset_refs = self._select_asset_refs(content_mode, breakdown.get("source_assets") or [])
-        context_text = self._build_context_text(content_mode, foods, scenes, keywords)
-        composition_variants = [
-            "俯拍构图，主体居中，强调整体层次",
-            "45 度近景，突出主体细节与质感",
-            "平视中景，平衡主体与环境氛围",
-            "特写镜头，聚焦关键纹理和光影",
-            "低角度构图，增强画面立体感",
-            "远景留白构图，突出叙事空间感",
+        source_assets = breakdown.get("source_assets") or []
+        available_asset_ids = [
+            str(item.get("asset_id")).strip()
+            for item in source_assets
+            if str(item.get("asset_id") or "").strip()
         ]
+        if not available_asset_ids:
+            raise DomainError(code="E-1003", message="素材不足，无法生成提示词", status_code=400)
+        style_payload = style.get("style_payload") or {}
+        allocation_specs = self._build_prompt_specs_from_allocation(
+            style_payload=style_payload,
+            image_count=image_count,
+            available_asset_ids=available_asset_ids,
+        )
+        if allocation_specs is not None:
+            return allocation_specs
+        style_description = self._format_style_payload(style.get("style_payload") or {})
+        provider, model_name = self._resolve_text_model_provider()
+        user_prompt = self._build_prompt_plan_user_prompt(
+            image_count=image_count,
+            style_description=style_description,
+            breakdown=breakdown,
+            source_assets=source_assets,
+            content_mode=content_mode,
+        )
+        try:
+            raw_text = self._call_text_model_for_copy(
+                provider=provider,
+                model_name=model_name,
+                system_prompt=PROMPT_PLAN_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+            )
+            payload = self._parse_prompt_plan_payload(raw_text)
+        except CopyModelError as error:
+            raise DomainError(code="E-1004", message=f"提示词生成失败：{error.detail}", status_code=503) from error
+        except (ValueError, TypeError, json.JSONDecodeError) as error:
+            raise DomainError(code="E-1004", message="提示词生成失败：模型返回格式异常，请重试", status_code=503) from error
+        return self._normalize_prompt_plan_items(
+            payload=payload,
+            image_count=image_count,
+            available_asset_ids=available_asset_ids,
+        )
+
+    def _build_prompt_specs_from_allocation(
+        self,
+        *,
+        style_payload: dict[str, Any],
+        image_count: int,
+        available_asset_ids: list[str],
+    ) -> list[dict[str, Any]] | None:
+        raw_plan = style_payload.get("allocation_plan")
+        if raw_plan is None:
+            return None
+        if not isinstance(raw_plan, list) or len(raw_plan) < image_count:
+            raise DomainError(code="E-1004", message="分图方案缺失或不完整，请返回灵感对话重新确认", status_code=400)
+        valid_asset_ids = set(available_asset_ids)
         prompt_specs: list[dict[str, Any]] = []
-        for index in range(1, image_count + 1):
-            variant = composition_variants[(index - 1) % len(composition_variants)]
-            prompt_text = (
-                "请只生成一张图片。\n"
-                f"内容要求：{context_text}\n"
-                f"风格要求：{style_description}\n"
-                f"构图差异化要求：{variant}。\n"
-                "画面要求：主体清晰、细节完整、构图平衡。\n"
+        for index, raw_item in enumerate(raw_plan[:image_count], start=1):
+            if not isinstance(raw_item, dict):
+                raise DomainError(code="E-1004", message="分图方案格式异常，请返回灵感对话重新确认", status_code=400)
+            if not bool(raw_item.get("confirmed")):
+                raise DomainError(code="E-1004", message="分图方案尚未确认，请先在灵感对话中确认后再生成", status_code=400)
+            focus_description = str(raw_item.get("focus_description") or "").strip()
+            if not focus_description:
+                raise DomainError(code="E-1004", message="分图方案缺少重点内容，请返回灵感对话重新确认", status_code=400)
+            source_asset_ids = raw_item.get("source_asset_ids")
+            if not isinstance(source_asset_ids, list):
+                source_asset_ids = []
+            asset_refs: list[str] = []
+            seen: set[str] = set()
+            for value in source_asset_ids:
+                asset_id = str(value).strip()
+                if not asset_id or asset_id in seen or asset_id not in valid_asset_ids:
+                    continue
+                seen.add(asset_id)
+                asset_refs.append(asset_id)
+            if not asset_refs:
+                raise DomainError(code="E-1004", message="分图方案缺少可追溯素材来源，请返回灵感对话重新确认", status_code=400)
+            prompt_text = self._build_prompt_text_from_allocation(raw_item, index=index)
+            prompt_specs.append(
+                {
+                    "prompt_text": self._ensure_single_image_prompt(prompt_text),
+                    "asset_refs": asset_refs,
+                }
+            )
+        return prompt_specs
+
+    def _build_prompt_text_from_allocation(self, plan_item: dict[str, Any], *, index: int) -> str:
+        focus_title = str(plan_item.get("focus_title") or f"第{index}张重点").strip()
+        focus_description = str(plan_item.get("focus_description") or "").strip()
+        locations = "、".join(str(value).strip() for value in (plan_item.get("locations") or []) if str(value).strip()) or "无"
+        scenes = "、".join(str(value).strip() for value in (plan_item.get("scenes") or []) if str(value).strip()) or "无"
+        foods = "、".join(str(value).strip() for value in (plan_item.get("foods") or []) if str(value).strip()) or "无"
+        keywords = "、".join(str(value).strip() for value in (plan_item.get("keywords") or []) if str(value).strip()) or "无"
+        return (
+            f"{focus_title}：{focus_description}\n"
+            f"地点：{locations}；景点：{scenes}；美食：{foods}；关键词：{keywords}。\n"
+            "强约束：只能围绕本条列出的地点/景点/美食展开，禁止引入未确认的实体。"
+        )
+
+    def _build_prompt_plan_user_prompt(
+        self,
+        *,
+        image_count: int,
+        style_description: str,
+        breakdown: dict[str, Any],
+        source_assets: list[dict[str, Any]],
+        content_mode: str,
+    ) -> str:
+        extracted = breakdown.get("extracted") or {}
+        foods = "、".join(extracted.get("foods") or []) or "无"
+        scenes = "、".join(extracted.get("scenes") or []) or "无"
+        keywords = "、".join(extracted.get("keywords") or []) or "无"
+        lines = [
+            f"内容模式：{content_mode}",
+            f"目标张数：{image_count}",
+            f"风格描述：{style_description}",
+            f"资产提取-食物：{foods}",
+            f"资产提取-景点：{scenes}",
+            f"资产提取-关键词：{keywords}",
+            "可用素材列表：",
+        ]
+        for source in source_assets:
+            asset_id = str(source.get("asset_id") or "").strip()
+            asset_type = str(source.get("asset_type") or "").strip()
+            content = str(source.get("content") or "").strip()
+            if not asset_id:
+                continue
+            lines.append(f"- asset_id={asset_id}; asset_type={asset_type}; content={content}")
+        lines.append("请输出 JSON。")
+        return "\n".join(lines)
+
+    def _parse_prompt_plan_payload(self, model_text: str) -> dict[str, Any]:
+        text = model_text.strip()
+        if text.startswith("```"):
+            lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            raise ValueError("提示词规划响应缺少 JSON 对象")
+        payload = json.loads(text[start : end + 1])
+        if not isinstance(payload, dict):
+            raise ValueError("提示词规划响应结构非法")
+        return payload
+
+    def _normalize_prompt_plan_items(
+        self,
+        *,
+        payload: dict[str, Any],
+        image_count: int,
+        available_asset_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        items = payload.get("items")
+        if not isinstance(items, list) or len(items) < image_count:
+            raise ValueError("提示词规划数量不足")
+        valid_asset_ids = set(available_asset_ids)
+        normalized_specs: list[dict[str, Any]] = []
+        for item in items[:image_count]:
+            if not isinstance(item, dict):
+                raise ValueError("提示词规划项结构非法")
+            prompt_text = str(item.get("prompt_text") or "").strip()
+            if not prompt_text:
+                raise ValueError("提示词规划缺少 prompt_text")
+            raw_asset_refs = item.get("asset_refs") if isinstance(item.get("asset_refs"), list) else []
+            asset_refs: list[str] = []
+            seen: set[str] = set()
+            for value in raw_asset_refs:
+                asset_id = str(value).strip()
+                if not asset_id or asset_id not in valid_asset_ids or asset_id in seen:
+                    continue
+                seen.add(asset_id)
+                asset_refs.append(asset_id)
+            if not asset_refs:
+                raise ValueError("提示词规划缺少有效 asset_refs")
+            normalized_specs.append(
+                {
+                    "prompt_text": self._ensure_single_image_prompt(prompt_text),
+                    "asset_refs": asset_refs,
+                }
+            )
+        return normalized_specs
+
+    def _ensure_single_image_prompt(self, prompt_text: str) -> str:
+        normalized = prompt_text.strip()
+        if "请只生成一张图片" not in normalized:
+            normalized = f"请只生成一张图片。\n{normalized}"
+        if "禁止拼贴" not in normalized:
+            normalized = (
+                f"{normalized}\n"
                 "强约束：禁止拼贴、禁止九宫格、禁止分镜、禁止多画面合成、禁止任何文字水印。"
             )
-            prompt_specs.append({"prompt_text": prompt_text, "asset_refs": list(asset_refs)})
-        return prompt_specs
+        if "仅借鉴风格" not in normalized:
+            normalized = (
+                f"{normalized}\n"
+                "参考图约束：若提供参考图，仅借鉴笔触、配色与版式，不得复制参考图中的具体地点、食物、人物或文字。"
+            )
+        return normalized
 
     async def _generate_images(
         self,
@@ -361,7 +687,15 @@ class GenerationWorker:
                     ),
                 )
             except DomainError as error:
-                last_error_message = error.message
+                if last_error_message is None:
+                    last_error_message = error.message
+                else:
+                    current_is_network_error = "网络异常" in error.message
+                    previous_is_network_error = "网络异常" in last_error_message
+                    if previous_is_network_error and not current_is_network_error:
+                        last_error_message = error.message
+                    elif previous_is_network_error == current_is_network_error:
+                        last_error_message = error.message
                 if attempt <= max_retry_per_slot:
                     pending_slots.append(slot)
                 else:
@@ -629,11 +963,7 @@ class GenerationWorker:
         if not allow_image_reference:
             return []
         references: list[str] = []
-        source_assets_by_id = {
-            asset.get("id"): asset
-            for asset in source_assets
-            if isinstance(asset.get("id"), str)
-        }
+        source_assets_by_id = {asset.get("id"): asset for asset in source_assets if isinstance(asset.get("id"), str)}
         tagged_reference_asset_ids = self._collect_tagged_reference_asset_ids(session_id)
         sample_asset_id = style_payload.get("sample_image_asset_id")
         if isinstance(sample_asset_id, str) and sample_asset_id.strip():
@@ -641,6 +971,9 @@ class GenerationWorker:
             sample_path = sample_asset.get("file_path") if sample_asset else None
             if isinstance(sample_path, str) and sample_path.strip():
                 references.append(sample_path.strip())
+        sample_file_path = style_payload.get("sample_image_file_path")
+        if isinstance(sample_file_path, str) and sample_file_path.strip():
+            references.append(sample_file_path.strip())
         for asset_id in tagged_reference_asset_ids:
             asset = source_assets_by_id.get(asset_id) or self.asset_repo.get(asset_id)
             if not asset or asset.get("asset_type") != "image":
@@ -648,14 +981,6 @@ class GenerationWorker:
             asset_path = asset.get("file_path")
             if isinstance(asset_path, str) and asset_path.strip():
                 references.append(asset_path.strip())
-        for asset in source_assets:
-            if asset.get("asset_type") != "image":
-                continue
-            file_path = asset.get("file_path")
-            if not isinstance(file_path, str) or not file_path.strip():
-                continue
-            if self._looks_like_style_reference_asset(asset):
-                references.append(file_path.strip())
         deduplicated: list[str] = []
         seen: set[str] = set()
         for item in references:
@@ -750,11 +1075,7 @@ class GenerationWorker:
         api_key: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+        headers = self._build_upstream_headers(api_key)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         upstream_request = request.Request(url=url, method="POST", headers=headers, data=body)
         try:
@@ -934,6 +1255,8 @@ class GenerationWorker:
         stripped = (raw_text or "").strip()
         if not stripped:
             return None
+        if self._looks_like_html_error_page(stripped):
+            return "上游网关拒绝访问（返回 HTML 页面）"
         try:
             parsed = json.loads(stripped)
         except json.JSONDecodeError:
@@ -941,6 +1264,27 @@ class GenerationWorker:
         if not isinstance(parsed, dict):
             return stripped[:120]
         return self._extract_upstream_error_message(parsed)
+
+    def _build_upstream_headers(self, api_key: str) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+        }
+
+    def _looks_like_html_error_page(self, body_text: str) -> bool:
+        lowered = (body_text or "").strip().lower()
+        return lowered.startswith("<!doctype html") or lowered.startswith("<html")
+
+    def _build_upstream_http_error_detail(self, *, status_code: int, body_text: str) -> str:
+        if self._looks_like_html_error_page(body_text):
+            return f"HTTP {status_code}: 上游网关拒绝访问（返回 HTML 页面）"
+        return f"HTTP {status_code}: {body_text[:120]}"
 
     def _download_binary(
         self,
@@ -1018,55 +1362,6 @@ class GenerationWorker:
             return "avif"
         return ""
 
-    def _split_tokens(self, text: str) -> list[str]:
-        pieces = re.split(r"[\s,，。！？；、\n\r\t]+", text)
-        return [piece.strip() for piece in pieces if piece.strip()]
-
-    def _classify_tokens(self, tokens: list[str]) -> tuple[list[str], list[str]]:
-        foods = [token for token in tokens if any(marker in token for marker in FOOD_MARKERS)]
-        scenes = [token for token in tokens if any(marker in token for marker in SCENE_MARKERS)]
-        return foods, scenes
-
-    def _append_unique(self, target: list[str], values: list[str]) -> None:
-        existing = set(target)
-        for value in values:
-            if value not in existing:
-                target.append(value)
-                existing.add(value)
-
-    def _select_asset_refs(self, content_mode: str, source_assets: list[dict[str, Any]]) -> list[str]:
-        source_ids = [item["asset_id"] for item in source_assets if item.get("asset_id")]
-        if not source_ids:
-            return []
-        if content_mode == "scenic":
-            preferred_types = {"scenic_name", "text", "transcript", "image"}
-        elif content_mode == "food_scenic":
-            preferred_types = {"food_name", "scenic_name", "text", "transcript", "image"}
-        else:
-            preferred_types = {"food_name", "text", "transcript", "image"}
-        selected_ids = [
-            item["asset_id"]
-            for item in source_assets
-            if item.get("asset_id") and item.get("asset_type") in preferred_types
-        ]
-        return selected_ids or source_ids
-
-    def _build_context_text(
-        self,
-        content_mode: str,
-        foods: list[str],
-        scenes: list[str],
-        keywords: list[str],
-    ) -> str:
-        food_text = "、".join(foods[:4]) if foods else "未指定食材"
-        scene_text = "、".join(scenes[:4]) if scenes else "未指定场景"
-        keyword_text = "、".join(keywords[:6]) if keywords else "无额外关键词"
-        if content_mode == "scenic":
-            return f"重点呈现场景氛围，核心场景：{scene_text}；辅助关键词：{keyword_text}。"
-        if content_mode == "food_scenic":
-            return f"平衡食材与场景，食材：{food_text}；场景：{scene_text}；关键词：{keyword_text}。"
-        return f"重点呈现食材细节，核心食材：{food_text}；环境点缀：{scene_text}；关键词：{keyword_text}。"
-
     def _format_style_payload(self, style_payload: dict[str, Any]) -> str:
         if not style_payload:
             return "保持自然写实风格。"
@@ -1110,8 +1405,6 @@ class GenerationWorker:
     ) -> dict[str, Any]:
         try:
             provider, model_name = self._resolve_text_model_provider()
-            if self._is_demo_provider_base_url(provider.get("base_url")):
-                raise CopyModelError("demo_provider_skip", "占位提供商跳过模型文案生成")
             system_prompt = self._build_copy_system_prompt(content_mode)
             user_prompt = self._build_copy_user_prompt(
                 style=style,
@@ -1125,20 +1418,26 @@ class GenerationWorker:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
             )
-            payload = self._parse_copy_payload(raw_text)
+            try:
+                payload = self._parse_copy_payload(raw_text)
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                retry_text = self._call_text_model_for_copy(
+                    provider=provider,
+                    model_name=model_name,
+                    system_prompt=self._build_copy_system_prompt(content_mode, strict_json=True),
+                    user_prompt=(
+                        f"{user_prompt}\n"
+                        "上一次输出未满足 JSON 结构，请仅输出一个合法 JSON 对象，不要 Markdown、不要解释。"
+                    ),
+                )
+                payload = self._parse_copy_payload(retry_text)
             return self._normalize_copy_payload(job=job, payload=payload)
-        except (CopyModelError, DomainError, ValueError, KeyError, TypeError) as error:
-            logger.warning("文案生成降级到模板: job_id=%s reason=%s", job["id"], str(error))
-            return self._build_copy_fallback(job=job, style=style, images=images, content_mode=content_mode)
-
-    def _is_demo_provider_base_url(self, base_url: Any) -> bool:
-        if not isinstance(base_url, str) or not base_url.strip():
-            return False
-        try:
-            hostname = (urlparse(base_url).hostname or "").lower()
-        except Exception:
-            return False
-        return hostname == "example.com"
+        except CopyModelError as error:
+            raise DomainError(code="E-1004", message=f"文案生成失败：{error.detail}", status_code=503) from error
+        except DomainError:
+            raise
+        except (ValueError, KeyError, TypeError) as error:
+            raise DomainError(code="E-1004", message="文案生成失败：模型返回格式异常，请重试", status_code=503) from error
 
     def _resolve_text_model_provider(self) -> tuple[dict[str, Any], str]:
         routing = self.model_service.require_routing()
@@ -1152,19 +1451,24 @@ class GenerationWorker:
             raise DomainError(code="E-1006", message="文字模型提供商不可用", status_code=400)
         return provider, model_name
 
-    def _build_copy_system_prompt(self, content_mode: str) -> str:
+    def _build_copy_system_prompt(self, content_mode: str, strict_json: bool = False) -> str:
         mode_prompt = {
             "food": "突出食材细节、操作步骤和可复刻性。",
             "scenic": "突出场景氛围、动线和镜头叙事。",
             "food_scenic": "兼顾食材表达与场景叙事，强调融合感。",
         }.get(content_mode, "输出高质量可发布图文内容。")
         return (
-            "你是 Savory Canvas 资深内容编辑。"
+            "你是 Savory Canvas 资深内容总编。"
             "请输出严格 JSON，不要输出 Markdown。"
             "JSON 结构必须为："
             '{"title":"", "intro":"", "guide_sections":[{"heading":"","content":""}], "ending":"", "full_text":""}。'
             f"{mode_prompt}"
-            "要求：中文表达自然，信息密度高，guide_sections 至少 3 段，每段内容不少于 24 个字。"
+            "要求：中文表达自然、专业、可发布，避免口号化空话。"
+            "标题要具体有吸引力，导语要给出清晰价值承诺。"
+            "guide_sections 至少 3 段，每段需可执行，建议包含“看点/路线/实操建议/避坑提示”等。"
+            "ending 需包含行动引导（收藏、评论、到店/到景点打卡等）。"
+            "full_text 必须是可直接发布的完整长文，不是字段拼接。"
+            + ("本次必须只输出一个 JSON 对象，不允许任何额外文本。" if strict_json else "")
         )
 
     def _build_copy_user_prompt(
@@ -1203,31 +1507,67 @@ class GenerationWorker:
         system_prompt: str,
         user_prompt: str,
     ) -> str:
-        protocol_order = self._build_text_protocol_order(provider.get("api_protocol"))
+        provider_id = str(provider.get("id") or "").strip()
+        max_attempts = 3
         last_error: CopyModelError | None = None
-        for index, protocol in enumerate(protocol_order):
-            endpoint, payload = self._build_text_protocol_payload(
-                provider=provider,
-                model_name=model_name,
-                protocol=protocol,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
-            try:
-                response_payload = self._post_text_json(endpoint=endpoint, api_key=provider["api_key"], payload=payload)
-                content = self._extract_text_from_text_payload(response_payload, protocol)
-                if not content.strip():
-                    raise CopyModelError("empty_content", "上游未返回文案内容")
-                return content
-            except CopyModelError as error:
-                last_error = error
-                if index == 0 and self._should_retry_text_protocol(error):
-                    continue
-                break
+
+        for attempt in range(1, max_attempts + 1):
+            protocol_order = self._build_text_protocol_order(provider_id, provider.get("api_protocol"))
+            for index, protocol in enumerate(protocol_order):
+                endpoint, payload = self._build_text_protocol_payload(
+                    provider=provider,
+                    model_name=model_name,
+                    protocol=protocol,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                )
+                try:
+                    response_payload = self._post_text_json(
+                        endpoint=endpoint,
+                        api_key=provider["api_key"],
+                        payload=payload,
+                        provider_id=provider_id,
+                        model_name=model_name,
+                    )
+                    content = self._extract_text_from_text_payload(response_payload, protocol)
+                    if not content.strip():
+                        raise CopyModelError("empty_content", "上游未返回文案内容")
+                    if provider_id:
+                        self._text_protocol_overrides[provider_id] = protocol
+                    return content
+                except CopyModelError as error:
+                    last_error = error
+                    if index == 0 and self._should_retry_text_protocol(error):
+                        logger.warning(
+                            "文案协议回退重试: from=%s to=%s provider=%s model=%s reason=%s detail=%s",
+                            protocol,
+                            protocol_order[1],
+                            provider_id or "-",
+                            model_name,
+                            error.reason,
+                            error.detail,
+                        )
+                        continue
+                    break
+            if last_error and attempt < max_attempts and self._should_retry_text_request(last_error):
+                logger.warning(
+                    "文案模型重试: attempt=%s/%s provider=%s model=%s reason=%s detail=%s",
+                    attempt,
+                    max_attempts,
+                    provider_id or "-",
+                    model_name,
+                    last_error.reason,
+                    last_error.detail,
+                )
+                continue
+            break
+
         raise CopyModelError("protocol_both_failed", last_error.detail if last_error else "双协议调用失败")
 
-    def _build_text_protocol_order(self, configured_protocol: str | None) -> list[str]:
-        if configured_protocol == "chat_completions":
+    def _build_text_protocol_order(self, provider_id: str, configured_protocol: str | None) -> list[str]:
+        override_protocol = self._text_protocol_overrides.get(provider_id)
+        active_protocol = override_protocol or configured_protocol
+        if active_protocol == "chat_completions":
             return ["chat_completions", "responses"]
         return ["responses", "chat_completions"]
 
@@ -1247,7 +1587,17 @@ class GenerationWorker:
                 {
                     "model": model_name,
                     "instructions": system_prompt,
-                    "input": user_prompt,
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": user_prompt,
+                                }
+                            ],
+                        }
+                    ],
                     "temperature": 0.2,
                 },
             )
@@ -1263,16 +1613,20 @@ class GenerationWorker:
             },
         )
 
-    def _post_text_json(self, *, endpoint: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+    def _post_text_json(
+        self,
+        *,
+        endpoint: str,
+        api_key: str,
+        payload: dict[str, Any],
+        provider_id: str,
+        model_name: str,
+    ) -> dict[str, Any]:
+        headers = self._build_upstream_headers(api_key)
         request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         upstream_request = request.Request(url=endpoint, method="POST", headers=headers, data=request_body)
         try:
-            with request.urlopen(upstream_request, timeout=30) as response:
+            with request.urlopen(upstream_request, timeout=45) as response:
                 raw_text = response.read().decode("utf-8")
         except url_error.HTTPError as error:
             body_text = error.read().decode("utf-8", errors="ignore")
@@ -1280,8 +1634,24 @@ class GenerationWorker:
                 raise CopyModelError("protocol_endpoint_not_supported", f"HTTP {error.code}") from error
             if self._looks_like_text_protocol_incompatible(error.code, body_text):
                 raise CopyModelError("protocol_incompatible", f"HTTP {error.code}") from error
-            raise CopyModelError("upstream_http_error", f"HTTP {error.code}") from error
+            reason = "upstream_retryable_http" if error.code in {408, 409, 425, 429, 500, 502, 503, 504} else "upstream_http_error"
+            logger.warning(
+                "文案上游 HTTP 失败: provider_id=%s model_name=%s endpoint=%s status=%s",
+                provider_id or "-",
+                model_name,
+                endpoint,
+                error.code,
+            )
+            detail = self._build_upstream_http_error_detail(status_code=error.code, body_text=body_text)
+            raise CopyModelError(reason, detail) from error
         except (url_error.URLError, TimeoutError, OSError) as error:
+            logger.warning(
+                "文案上游网络失败: provider_id=%s model_name=%s endpoint=%s reason=%s",
+                provider_id or "-",
+                model_name,
+                endpoint,
+                type(error).__name__,
+            )
             raise CopyModelError("upstream_network", str(error)) from error
         try:
             payload_json = json.loads(raw_text)
@@ -1296,6 +1666,8 @@ class GenerationWorker:
         common_markers = ["unsupported", "not support", "invalid_request_error", "messages", "input", "instructions"]
         if status_code == 400:
             return any(marker in lowered for marker in common_markers)
+        if status_code == 403 and self._looks_like_html_error_page(body_text):
+            return True
         if status_code >= 500:
             server_markers = ["not implemented", "convert_request_failed", "new_api_error"]
             return any(marker in lowered for marker in (common_markers + server_markers))
@@ -1303,6 +1675,9 @@ class GenerationWorker:
 
     def _should_retry_text_protocol(self, error: CopyModelError) -> bool:
         return error.reason in {"protocol_endpoint_not_supported", "protocol_incompatible"}
+
+    def _should_retry_text_request(self, error: CopyModelError) -> bool:
+        return error.reason in {"upstream_network", "upstream_retryable_http"}
 
     def _extract_text_from_text_payload(self, payload: dict[str, Any], protocol: str) -> str:
         if protocol == "responses":
@@ -1389,54 +1764,21 @@ class GenerationWorker:
             "created_at": now_iso(),
         }
 
-    def _build_copy_fallback(
-        self,
-        *,
-        job: dict[str, Any],
-        style: dict[str, Any],
-        images: list[dict[str, Any]],
-        content_mode: str,
-    ) -> dict[str, Any]:
-        if content_mode == "scenic":
-            guide_sections = [
-                {"heading": "场景观察", "content": "先明确主场景与叙事焦点，再根据时间与天气设定光线层次，确保画面情绪统一。"},
-                {"heading": "构图建议", "content": "建议以前景引导线连接中景主体和背景环境，形成稳定视觉动线并保留空间呼吸感。"},
-                {"heading": "发布建议", "content": "发布时补充地点标签、拍摄时间与镜头语言说明，能显著提升内容代入感和收藏率。"},
-            ]
-            title = f"{style['name']} 场景图文指南"
-            intro = f"本次共生成 {len(images)} 张场景配图，可用于氛围化内容发布。"
-            ending = "建议先发布场景主图，再追加细节图和拍摄花絮，形成完整叙事闭环。"
-        elif content_mode == "food_scenic":
-            guide_sections = [
-                {"heading": "食材与场景协调", "content": "食材主体建议放在视觉中心，场景元素围绕其展开，突出“可食性 + 氛围感”的双重叙事。"},
-                {"heading": "拍摄与出片建议", "content": "近景强调菜品质感，中远景强调场景氛围，注意色温统一，避免主体与环境出现割裂。"},
-                {"heading": "发布建议", "content": "文案可采用“场景开场-菜品细节-行动引导”三段结构，能提升停留时长和互动转化。"},
-            ]
-            title = f"{style['name']} 混合模式图文指南"
-            intro = f"本次共生成 {len(images)} 张食材与场景结合配图，可用于综合型内容发布。"
-            ending = "建议按平台定位微调语气，并在结尾加入明确行动引导。"
-        else:
-            guide_sections = [
-                {"heading": "准备食材", "content": "建议先按主料、辅料、调味三类整理，并提前完成称量和预处理，确保烹饪节奏稳定。"},
-                {"heading": "烹饪步骤", "content": "按“高温定型-中火入味-低温收汁”推进，可同时兼顾口感层次与出品稳定性。"},
-                {"heading": "发布建议", "content": "文案中同步写清关键火候、替代食材和失败避坑点，能明显提升内容实用价值。"},
-            ]
-            title = f"{style['name']} 图文指南"
-            intro = f"本次共生成 {len(images)} 张配图，可用于内容发布。"
-            ending = "建议发布前补充食材克重和时间节点，增强复刻成功率。"
-        full_text = "\n".join([title, intro] + [f"{item['heading']}：{item['content']}" for item in guide_sections] + [ending])
-        return {
-            "id": new_id(),
-            "job_id": job["id"],
-            "title": title,
-            "intro": intro,
-            "guide_sections": guide_sections,
-            "ending": ending,
-            "full_text": full_text,
-            "created_at": now_iso(),
-        }
-
     def _fail(self, job_id: str, error_code: str, error_message: str) -> None:
+        current_job = self.job_repo.get(job_id)
+        if current_job:
+            current_stage = str(current_job.get("current_stage") or "").strip()
+            if current_stage and current_stage != "finalize":
+                self._advance(
+                    job_id=job_id,
+                    status="running",
+                    progress=int(current_job.get("progress_percent") or 0),
+                    stage=current_stage,
+                    stage_message=current_job.get("stage_message") or "阶段失败",
+                    error_code=error_code,
+                    error_message=error_message,
+                    log_status="failed",
+                )
         self._advance(
             job_id,
             status="failed",

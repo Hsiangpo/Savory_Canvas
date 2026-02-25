@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from pathlib import Path
 from typing import Any
 from urllib import error as url_error
+from urllib import parse as url_parse
 from urllib import request
 
 from backend.app.core.errors import DomainError, not_found
@@ -22,27 +24,20 @@ STAGE_OPTION_RULES = {
     "painting_style": {
         "title": "请选择绘画风格",
         "max": 2,
-        "fallback_items": ["油画厚涂", "水彩晕染", "电影写实", "卡通渲染"],
     },
     "background_decor": {
         "title": "请选择背景装饰",
         "max": 2,
-        "fallback_items": ["暖光餐桌", "窗边光影", "木质餐具", "花束点缀"],
     },
     "color_mood": {
         "title": "请选择色彩情绪",
         "max": 2,
-        "fallback_items": ["暖金氛围", "清新绿调", "复古棕调", "冷调蓝灰"],
     },
     "image_count": {
         "title": "请选择生成数量",
         "max": 1,
-        "fallback_items": ["1", "2", "3", "4"],
     },
 }
-
-DEFAULT_DOWNGRADE_REPLY = "模型服务暂不可用，已降级为默认候选方案。"
-DEFAULT_RUNTIME_REPLY = "已根据当前输入实时生成候选项。"
 
 
 class StyleFallbackError(Exception):
@@ -68,6 +63,8 @@ class StyleService:
         self.asset_repo = asset_repo
         self.storage = storage
         self.public_base_url = (public_base_url or "").rstrip("/")
+        # 记录每个提供商最近一次成功协议，避免每次都先走不兼容端点。
+        self._provider_protocol_overrides: dict[str, str] = {}
 
     def chat(
         self,
@@ -95,15 +92,18 @@ class StyleService:
             )
         except StyleFallbackError as exc:
             logger.warning(
-                "风格对话降级: session_id=%s stage=%s reason=%s detail=%s",
+                "风格对话失败: session_id=%s stage=%s reason=%s detail=%s",
                 session_id,
                 response_stage,
                 exc.reason,
                 exc.detail,
             )
-            fallback_used = True
-            reply = DEFAULT_DOWNGRADE_REPLY
-            options = self._build_fallback_options(response_stage)
+            raise DomainError(
+                code="E-1004",
+                message="模型服务连接失败，请稍后重试",
+                status_code=503,
+                details={"reason": exc.reason},
+            ) from exc
         except Exception as exc:
             logger.exception("风格对话发生未预期异常")
             raise DomainError(code="E-1099", message="系统内部错误", status_code=500) from exc
@@ -125,6 +125,7 @@ class StyleService:
             raise not_found("会话", session_id)
         normalized_payload = self._normalize_style_payload(style_payload)
         self._validate_sample_image_asset_id(session_id=session_id, style_payload=normalized_payload, strict=True)
+        self._sync_sample_image_snapshot(normalized_payload, previous_payload=None)
         now = now_iso()
         profile = {
             "id": new_id(),
@@ -151,12 +152,14 @@ class StyleService:
             profile = self.style_repo.update_name(style_id, name, now) or profile
             changed = True
         if style_payload is not None:
+            previous_payload = self._normalize_style_payload(dict(profile.get("style_payload") or {}))
             normalized_payload = self._normalize_style_payload(style_payload)
             self._validate_sample_image_asset_id(
                 session_id=profile.get("session_id"),
                 style_payload=normalized_payload,
                 strict=True,
             )
+            self._sync_sample_image_snapshot(normalized_payload, previous_payload=previous_payload)
             profile = self.style_repo.update_payload(style_id, normalized_payload, now) or profile
             changed = True
         if not changed:
@@ -183,6 +186,11 @@ class StyleService:
         sample_image_asset_id = style_payload.get("sample_image_asset_id")
         if sample_image_asset_id is not None and (not isinstance(sample_image_asset_id, str) or not sample_image_asset_id.strip()):
             raise DomainError(code="E-1099", message="sample_image_asset_id 不合法", status_code=400)
+        sample_image_file_path = style_payload.get("sample_image_file_path")
+        if sample_image_file_path is not None and (
+            not isinstance(sample_image_file_path, str) or not sample_image_file_path.strip()
+        ):
+            raise DomainError(code="E-1099", message="sample_image_file_path 不合法", status_code=400)
         extra_keywords = style_payload.get("extra_keywords")
         if extra_keywords is None:
             extra_keywords = []
@@ -197,12 +205,16 @@ class StyleService:
             "sample_image_asset_id": sample_image_asset_id.strip() if isinstance(sample_image_asset_id, str) else None,
             "extra_keywords": normalized_keywords,
         }
+        if isinstance(sample_image_file_path, str) and sample_image_file_path.strip():
+            normalized_payload["sample_image_file_path"] = sample_image_file_path.strip()
         if isinstance(style_payload.get("force_partial_fail"), bool):
             normalized_payload["force_partial_fail"] = style_payload["force_partial_fail"]
         if isinstance(style_payload.get("image_count"), (int, str)):
             normalized_payload["image_count"] = style_payload["image_count"]
         if isinstance(style_payload.get("draft_style_id"), str):
             normalized_payload["draft_style_id"] = style_payload["draft_style_id"]
+        if "allocation_plan" in style_payload:
+            normalized_payload["allocation_plan"] = self._normalize_allocation_plan(style_payload.get("allocation_plan"))
         return normalized_payload
 
     def _coerce_text(self, value: Any, *, default: str) -> str:
@@ -227,6 +239,39 @@ class StyleService:
             normalized.append(text)
         return normalized
 
+    def _normalize_allocation_plan(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        normalized_items: list[dict[str, Any]] = []
+        for item in value[:10]:
+            if not isinstance(item, dict):
+                continue
+            slot_index_raw = item.get("slot_index")
+            slot_index = int(slot_index_raw) if isinstance(slot_index_raw, (int, float, str)) and str(slot_index_raw).isdigit() else 0
+            if slot_index <= 0:
+                continue
+            focus_title = str(item.get("focus_title") or "").strip()
+            focus_description = str(item.get("focus_description") or "").strip()
+            if not focus_description:
+                continue
+            normalized_items.append(
+                {
+                    "slot_index": slot_index,
+                    "focus_title": focus_title or f"第{slot_index}张重点",
+                    "focus_description": focus_description,
+                    "locations": self._normalize_keyword_list(item.get("locations") if isinstance(item.get("locations"), list) else []),
+                    "scenes": self._normalize_keyword_list(item.get("scenes") if isinstance(item.get("scenes"), list) else []),
+                    "foods": self._normalize_keyword_list(item.get("foods") if isinstance(item.get("foods"), list) else []),
+                    "keywords": self._normalize_keyword_list(item.get("keywords") if isinstance(item.get("keywords"), list) else []),
+                    "source_asset_ids": self._normalize_keyword_list(
+                        item.get("source_asset_ids") if isinstance(item.get("source_asset_ids"), list) else []
+                    ),
+                    "confirmed": bool(item.get("confirmed")),
+                }
+            )
+        normalized_items.sort(key=lambda plan_item: int(plan_item.get("slot_index") or 0))
+        return normalized_items
+
     def _enrich_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
         payload = self._normalize_style_payload(dict(profile.get("style_payload") or {}))
         self._validate_sample_image_asset_id(
@@ -234,13 +279,50 @@ class StyleService:
             style_payload=payload,
             strict=False,
         )
-        sample_image_asset_id = payload.get("sample_image_asset_id")
-        sample_image_preview_url = self._resolve_sample_image_preview_url(sample_image_asset_id)
+        sample_image_preview_url = self._resolve_sample_image_preview_url(payload)
         return {
             **profile,
             "style_payload": payload,
             "sample_image_preview_url": sample_image_preview_url,
         }
+
+    def _sync_sample_image_snapshot(
+        self,
+        style_payload: dict[str, Any],
+        previous_payload: dict[str, Any] | None,
+    ) -> None:
+        sample_image_asset_id = style_payload.get("sample_image_asset_id")
+        resolved_path = self._resolve_sample_image_file_path_from_asset(sample_image_asset_id)
+        if resolved_path:
+            style_payload["sample_image_file_path"] = resolved_path
+            return
+        if not previous_payload:
+            style_payload.pop("sample_image_file_path", None)
+            return
+        previous_path = previous_payload.get("sample_image_file_path")
+        previous_asset_id = previous_payload.get("sample_image_asset_id")
+        if (
+            isinstance(previous_path, str)
+            and previous_path.strip()
+            and (
+                (isinstance(sample_image_asset_id, str) and sample_image_asset_id == previous_asset_id)
+                or sample_image_asset_id is None
+            )
+        ):
+            style_payload["sample_image_file_path"] = previous_path.strip()
+            return
+        style_payload.pop("sample_image_file_path", None)
+
+    def _resolve_sample_image_file_path_from_asset(self, asset_id: Any) -> str | None:
+        if not isinstance(asset_id, str) or not asset_id.strip() or not self.asset_repo:
+            return None
+        asset = self.asset_repo.get(asset_id)
+        if not asset or asset.get("asset_type") != "image":
+            return None
+        file_path = asset.get("file_path")
+        if isinstance(file_path, str) and file_path.strip():
+            return file_path.strip()
+        return None
 
     def _validate_sample_image_asset_id(
         self,
@@ -264,22 +346,24 @@ class StyleService:
                 raise DomainError(code="E-1099", message="样例图必须绑定有效的图片素材", status_code=400)
             style_payload["sample_image_asset_id"] = None
             return
-        if session_id and asset.get("session_id") != session_id:
-            if strict:
-                raise DomainError(code="E-1099", message="样例图必须属于当前会话", status_code=400)
-            style_payload["sample_image_asset_id"] = None
-            return
 
-    def _resolve_sample_image_preview_url(self, asset_id: Any) -> str | None:
-        if not isinstance(asset_id, str) or not asset_id.strip():
-            return None
-        if not self.asset_repo or not self.storage or not self.public_base_url:
+    def _resolve_sample_image_preview_url(self, source: Any) -> str | None:
+        payload = source if isinstance(source, dict) else {}
+        file_path = payload.get("sample_image_file_path") if isinstance(payload, dict) else None
+        if isinstance(file_path, str) and file_path.strip():
+            preview_url = self._build_public_image_url(file_path)
+            if preview_url:
+                return preview_url
+        asset_id = source if isinstance(source, str) else payload.get("sample_image_asset_id")
+        if not isinstance(asset_id, str) or not asset_id.strip() or not self.asset_repo:
             return None
         asset = self.asset_repo.get(asset_id)
         if not asset or asset.get("asset_type") != "image":
             return None
-        file_path = asset.get("file_path")
-        if not isinstance(file_path, str) or not file_path.strip():
+        return self._build_public_image_url(asset.get("file_path"))
+
+    def _build_public_image_url(self, file_path: Any) -> str | None:
+        if not isinstance(file_path, str) or not file_path.strip() or not self.storage or not self.public_base_url:
             return None
         normalized = file_path.replace("\\", "/")
         if normalized.startswith("http://") or normalized.startswith("https://"):
@@ -321,13 +405,24 @@ class StyleService:
         provider, model_name = self._resolve_text_model_provider()
         user_prompt = self._build_user_prompt(session, stage, user_reply, selected_items)
         system_prompt = self._build_system_prompt(stage, strict_json=False)
-        model_text = self._call_text_model(
-            provider,
-            model_name,
-            system_prompt,
-            user_prompt,
-            strict_json=False,
-        )
+        session_image_urls = self._collect_session_image_urls(str(session.get("id") or ""))
+        if session_image_urls:
+            model_text = self._call_text_model_with_images(
+                provider,
+                model_name,
+                system_prompt,
+                user_prompt,
+                session_image_urls,
+                strict_json=False,
+            )
+        else:
+            model_text = self._call_text_model(
+                provider,
+                model_name,
+                system_prompt,
+                user_prompt,
+                strict_json=False,
+            )
         payload = None
         options = None
         try:
@@ -338,20 +433,47 @@ class StyleService:
                 raise
             logger.warning("风格对话触发严格 JSON 重试: reason=%s detail=%s", exc.reason, exc.detail)
             strict_system_prompt = self._build_system_prompt(stage, strict_json=True)
-            retry_text = self._call_text_model(
-                provider,
-                model_name,
-                strict_system_prompt,
-                user_prompt,
-                strict_json=True,
-            )
+            if session_image_urls:
+                retry_text = self._call_text_model_with_images(
+                    provider,
+                    model_name,
+                    strict_system_prompt,
+                    user_prompt,
+                    session_image_urls,
+                    strict_json=True,
+                )
+            else:
+                retry_text = self._call_text_model(
+                    provider,
+                    model_name,
+                    strict_system_prompt,
+                    user_prompt,
+                    strict_json=True,
+                )
             payload = self._parse_model_payload(retry_text)
             options = self._extract_and_validate_options(payload)
 
         reply = payload.get("reply") if isinstance(payload, dict) else None
         if not isinstance(reply, str) or not reply.strip():
-            reply = DEFAULT_RUNTIME_REPLY
+            raise StyleFallbackError("reply_missing", "模型输出缺少 reply")
         return reply, options
+
+    def _collect_session_image_urls(self, session_id: str) -> list[str]:
+        if not session_id or not self.asset_repo:
+            return []
+        urls: list[str] = []
+        seen: set[str] = set()
+        for asset in self.asset_repo.list_by_session(session_id):
+            if asset.get("asset_type") != "image":
+                continue
+            public_url = self._build_public_image_url(asset.get("file_path"))
+            if not public_url or public_url in seen:
+                continue
+            seen.add(public_url)
+            urls.append(public_url)
+            if len(urls) >= 4:
+                break
+        return urls
 
     def _resolve_text_model_provider(self) -> tuple[dict[str, Any], str]:
         try:
@@ -399,7 +521,6 @@ class StyleService:
         selected_text = "、".join(selected_items) if selected_items else "无"
         return (
             f"会话标题：{session.get('title', '')}\n"
-            f"内容模式：{session.get('content_mode', '')}\n"
             f"当前阶段：{stage}\n"
             f"用户输入：{user_reply or '无'}\n"
             f"已选项：{selected_text}\n"
@@ -415,7 +536,8 @@ class StyleService:
         *,
         strict_json: bool,
     ) -> str:
-        protocol_order = self._build_protocol_order(provider.get("api_protocol"))
+        provider_id = str(provider.get("id") or "").strip()
+        protocol_order = self._build_protocol_order(provider_id, provider.get("api_protocol"))
         last_error: StyleFallbackError | None = None
 
         for index, protocol in enumerate(protocol_order):
@@ -432,6 +554,8 @@ class StyleService:
                 text = self._extract_text_content(response_payload, protocol)
                 if not text.strip():
                     raise StyleFallbackError("upstream_empty_text", "上游未返回有效文本")
+                if provider_id:
+                    self._provider_protocol_overrides[provider_id] = protocol
                 return text
             except StyleFallbackError as exc:
                 last_error = exc
@@ -450,8 +574,142 @@ class StyleService:
             raise StyleFallbackError("protocol_both_failed", f"双协议调用失败: {last_error.reason} | {last_error.detail}")
         raise StyleFallbackError("protocol_both_failed", "双协议调用失败")
 
-    def _build_protocol_order(self, protocol: str | None) -> list[str]:
-        if protocol == "chat_completions":
+    def _call_text_model_with_images(
+        self,
+        provider: dict[str, Any],
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        image_urls: list[str],
+        *,
+        strict_json: bool,
+    ) -> str:
+        normalized_urls = self._normalize_multimodal_image_inputs(image_urls)
+        if not normalized_urls:
+            return self._call_text_model(
+                provider,
+                model_name,
+                system_prompt,
+                user_prompt,
+                strict_json=strict_json,
+            )
+        provider_id = str(provider.get("id") or "").strip()
+        protocol_order = self._build_protocol_order(provider_id, provider.get("api_protocol"))
+        last_error: StyleFallbackError | None = None
+
+        for index, protocol in enumerate(protocol_order):
+            endpoint, request_body = self._build_multimodal_protocol_request(
+                provider=provider,
+                protocol=protocol,
+                model_name=model_name,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_urls=normalized_urls,
+                strict_json=strict_json,
+            )
+            try:
+                response_payload = self._post_json(endpoint, request_body, provider["api_key"])
+                text = self._extract_text_content(response_payload, protocol)
+                if not text.strip():
+                    raise StyleFallbackError("upstream_empty_text", "上游未返回有效文本")
+                if provider_id:
+                    self._provider_protocol_overrides[provider_id] = protocol
+                return text
+            except StyleFallbackError as exc:
+                last_error = exc
+                if index == 0 and self._should_retry_protocol(exc):
+                    logger.warning(
+                        "多模态协议回退重试: from=%s to=%s reason=%s detail=%s",
+                        protocol,
+                        protocol_order[1],
+                        exc.reason,
+                        exc.detail,
+                    )
+                    continue
+                break
+
+        if last_error:
+            raise StyleFallbackError("protocol_both_failed", f"双协议调用失败: {last_error.reason} | {last_error.detail}")
+        raise StyleFallbackError("protocol_both_failed", "双协议调用失败")
+
+    def _normalize_multimodal_image_inputs(self, image_urls: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in image_urls:
+            if not isinstance(value, str):
+                continue
+            raw = value.strip()
+            if not raw:
+                continue
+            encoded = self._to_data_url_if_local(raw)
+            normalized.append(encoded or raw)
+            if len(normalized) >= 4:
+                break
+        return normalized
+
+    def _to_data_url_if_local(self, source: str) -> str | None:
+        local_path = self._resolve_local_image_path(source)
+        if not local_path:
+            return None
+        try:
+            content = local_path.read_bytes()
+        except OSError:
+            return None
+        mime_type = self._guess_image_mime(local_path, content)
+        if not mime_type:
+            return None
+        encoded = base64.b64encode(content).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+
+    def _resolve_local_image_path(self, source: str) -> Path | None:
+        if not self.storage:
+            return None
+        candidate = Path(source)
+        if candidate.is_file():
+            return candidate
+        normalized = source.replace("\\", "/").strip()
+        if normalized.startswith("http://") or normalized.startswith("https://"):
+            parsed = url_parse.urlparse(normalized)
+            normalized = parsed.path or ""
+        static_prefix = "/static/"
+        if normalized.startswith(static_prefix):
+            relative = normalized[len(static_prefix) :].lstrip("/")
+            path = self.storage.base_dir / relative
+            return path if path.is_file() else None
+        if self.public_base_url:
+            base = self.public_base_url.rstrip("/")
+            prefixed = f"{base}/static/"
+            if source.startswith(prefixed):
+                relative = source[len(prefixed) :].lstrip("/")
+                path = self.storage.base_dir / relative
+                return path if path.is_file() else None
+        return None
+
+    def _guess_image_mime(self, path: Path, content: bytes) -> str | None:
+        ext = path.suffix.lower().lstrip(".")
+        mapping = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "webp": "image/webp",
+            "gif": "image/gif",
+            "avif": "image/avif",
+        }
+        if ext in mapping:
+            return mapping[ext]
+        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if content.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if content.startswith(b"RIFF") and b"WEBP" in content[:16]:
+            return "image/webp"
+        if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
+            return "image/gif"
+        return None
+
+    def _build_protocol_order(self, provider_id: str, protocol: str | None) -> list[str]:
+        override = self._provider_protocol_overrides.get(provider_id)
+        active_protocol = override or protocol
+        if active_protocol == "chat_completions":
             return ["chat_completions", "responses"]
         return ["responses", "chat_completions"]
 
@@ -470,7 +728,17 @@ class StyleService:
             payload = {
                 "model": model_name,
                 "instructions": system_prompt,
-                "input": user_prompt,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": user_prompt,
+                            }
+                        ],
+                    }
+                ],
             }
             if strict_json:
                 payload["temperature"] = 0
@@ -481,6 +749,42 @@ class StyleService:
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0 if strict_json else 0.7,
+        }
+        return f"{base_url}/chat/completions", payload
+
+    def _build_multimodal_protocol_request(
+        self,
+        *,
+        provider: dict[str, Any],
+        protocol: str,
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        image_urls: list[str],
+        strict_json: bool,
+    ) -> tuple[str, dict[str, Any]]:
+        base_url = provider["base_url"].rstrip("/")
+        if protocol == "responses":
+            content: list[dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
+            content.extend({"type": "input_image", "image_url": image_url} for image_url in image_urls)
+            payload: dict[str, Any] = {
+                "model": model_name,
+                "instructions": system_prompt,
+                "input": [{"role": "user", "content": content}],
+            }
+            if strict_json:
+                payload["temperature"] = 0
+            return f"{base_url}/responses", payload
+
+        content_blocks: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+        content_blocks.extend({"type": "image_url", "image_url": {"url": image_url}} for image_url in image_urls)
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content_blocks},
             ],
             "temperature": 0 if strict_json else 0.7,
         }
@@ -542,7 +846,7 @@ class StyleService:
         request_data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         upstream_request = request.Request(url=url, method="POST", headers=headers, data=request_data)
         try:
-            with request.urlopen(upstream_request, timeout=20) as response:
+            with request.urlopen(upstream_request, timeout=35) as response:
                 raw_text = response.read().decode("utf-8")
         except url_error.HTTPError as exc:
             status_code = int(getattr(exc, "code", 0) or 0)
@@ -564,40 +868,87 @@ class StyleService:
 
     def _extract_text_content(self, payload: dict[str, Any], protocol: str) -> str:
         if protocol == "responses":
-            output_text = payload.get("output_text")
-            if isinstance(output_text, str) and output_text.strip():
-                return output_text
-            output_blocks = payload.get("output")
-            if isinstance(output_blocks, list):
-                for block in output_blocks:
-                    if not isinstance(block, dict):
-                        continue
-                    content = block.get("content")
-                    if not isinstance(content, list):
-                        continue
-                    for part in content:
-                        if not isinstance(part, dict):
-                            continue
-                        text = part.get("text")
-                        if isinstance(text, str) and text.strip():
-                            return text
+            response_text = self._extract_responses_text(payload)
+            if response_text:
+                return response_text
+            candidate_text = self._extract_candidate_text(payload)
+            if candidate_text:
+                return candidate_text
             raise StyleFallbackError("responses_missing_text", "responses 协议未返回文本内容")
 
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise StyleFallbackError("chat_missing_choices", "chat_completions 协议未返回 choices")
-        first_message = (choices[0] or {}).get("message") if isinstance(choices[0], dict) else {}
-        content = first_message.get("content") if isinstance(first_message, dict) else None
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
+        chat_text = self._extract_chat_text(payload)
+        if chat_text:
+            return chat_text
+        candidate_text = self._extract_candidate_text(payload)
+        if candidate_text:
+            return candidate_text
+        raise StyleFallbackError("chat_missing_text", "chat_completions 协议未返回文本内容")
+
+    def _extract_responses_text(self, payload: dict[str, Any]) -> str:
+        output_text = payload.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+        output_blocks = payload.get("output")
+        if not isinstance(output_blocks, list):
+            return ""
+        for block in output_blocks:
+            if not isinstance(block, dict):
+                continue
+            content = block.get("content")
+            if not isinstance(content, list):
+                continue
             for part in content:
                 if not isinstance(part, dict):
                     continue
                 text = part.get("text")
                 if isinstance(text, str) and text.strip():
-                    return text
-        raise StyleFallbackError("chat_missing_text", "chat_completions 协议未返回文本内容")
+                    return text.strip()
+                output_part_text = part.get("output_text")
+                if isinstance(output_part_text, str) and output_part_text.strip():
+                    return output_part_text.strip()
+        return ""
+
+    def _extract_chat_text(self, payload: dict[str, Any]) -> str:
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        first_message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+        if not isinstance(first_message, dict):
+            return ""
+        content = first_message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if not isinstance(content, list):
+            return ""
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+        return ""
+
+    def _extract_candidate_text(self, payload: dict[str, Any]) -> str:
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list):
+            return ""
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content")
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+        return ""
 
     def _parse_model_payload(self, model_text: str) -> dict[str, Any]:
         text = model_text.strip()
@@ -660,11 +1011,3 @@ class StyleService:
             seen.add(text)
             normalized.append(text)
         return normalized
-
-    def _build_fallback_options(self, stage: str) -> dict[str, Any]:
-        stage_rule = STAGE_OPTION_RULES[stage]
-        return {
-            "title": stage_rule["title"],
-            "items": list(stage_rule["fallback_items"]),
-            "max": stage_rule["max"],
-        }

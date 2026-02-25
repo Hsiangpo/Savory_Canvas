@@ -102,11 +102,24 @@ class InspirationStyleContext(BaseModel):
     style_payload: StylePayload | None = None
 
 
+class InspirationAllocationPlanItem(BaseModel):
+    slot_index: int = Field(ge=1, le=10)
+    focus_title: str
+    focus_description: str
+    locations: list[str] = Field(default_factory=list)
+    scenes: list[str] = Field(default_factory=list)
+    foods: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    source_asset_ids: list[str] = Field(default_factory=list)
+    confirmed: bool = False
+
+
 class InspirationDraft(BaseModel):
     stage: Literal["style_collecting", "prompt_revision", "asset_confirming", "locked"]
     style_payload: StylePayload | None = None
     image_count: int | None = Field(default=None, ge=1, le=10)
     draft_style_id: str | None = None
+    allocation_plan: list[InspirationAllocationPlanItem] = Field(default_factory=list)
     locked: bool
 
 

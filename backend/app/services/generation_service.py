@@ -114,7 +114,7 @@ class GenerationService:
         breakdown = self.result_repo.get_asset_breakdown(job_id)
         if breakdown:
             return breakdown
-        return self._build_breakdown_from_session_assets(job)
+        return self._build_pending_breakdown(job)
 
     def cancel(self, job_id: str) -> dict:
         canceled = self.job_repo.cancel(job_id, updated_at=now_iso(), log_id=new_id())
@@ -140,7 +140,7 @@ class GenerationService:
                 static_relative = static_relative
         return f"{self.public_base_url}/static/{static_relative.lstrip('/')}"
 
-    def _build_breakdown_from_session_assets(self, job: dict) -> dict:
+    def _build_pending_breakdown(self, job: dict) -> dict:
         session = self.session_repo.get(job["session_id"]) or {}
         assets = self.asset_repo.list_by_session(job["session_id"])
         source_assets = [
@@ -151,27 +151,11 @@ class GenerationService:
             }
             for asset in assets
         ]
-        foods: list[str] = []
-        scenes: list[str] = []
-        keywords: list[str] = []
-        for source in source_assets:
-            text = (source.get("content") or "").strip()
-            if not text:
-                continue
-            keywords.append(text)
-            if source["asset_type"] == "food_name":
-                foods.append(text)
-            if source["asset_type"] == "scenic_name":
-                scenes.append(text)
-        if not foods:
-            foods = keywords[:2]
-        if not scenes:
-            scenes = keywords[:2]
         return {
             "job_id": job["id"],
             "session_id": job["session_id"],
             "content_mode": session.get("content_mode") or "food",
             "source_assets": source_assets,
-            "extracted": {"foods": foods, "scenes": scenes, "keywords": keywords[:15]},
+            "extracted": {"foods": [], "scenes": [], "keywords": []},
             "created_at": job["created_at"],
         }

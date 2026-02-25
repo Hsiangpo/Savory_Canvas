@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { UploadCloud, FileVideo, Image as ImageIcon, Type, Loader2, CheckCircle2 } from 'lucide-react';
 import { useAppStore } from '../store';
 import * as api from '../api';
@@ -11,6 +11,20 @@ export default function AssetInputPanel() {
   const [textInput, setTextInput] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'processing' | 'success' | 'failed'>('idle');
+  const videoPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const clearVideoPoll = () => {
+    if (videoPollRef.current) {
+      clearInterval(videoPollRef.current);
+      videoPollRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      clearVideoPoll();
+    };
+  }, []);
 
   const handleUploadVideo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -18,35 +32,37 @@ export default function AssetInputPanel() {
 
     setIsUploading(true);
     setUploadStatus('idle');
+    clearVideoPoll();
     try {
       const asset = await api.uploadVideoAsset(activeSessionId, file);
       setUploadStatus('processing');
       // Poll for transcript status
-      const pollId = setInterval(async () => {
+      videoPollRef.current = setInterval(async () => {
         try {
           const t = await api.getTranscript(asset.id);
           if (t.status === 'ready') {
             setUploadStatus('success');
             setIsUploading(false);
             addToast('转写成功', 'success');
-            clearInterval(pollId);
+            clearVideoPoll();
           } else if (t.status === 'failed') {
             setUploadStatus('failed');
             setIsUploading(false);
             addToast('视频转写失败', 'error');
-            clearInterval(pollId);
+            clearVideoPoll();
           }
         } catch {
           setUploadStatus('failed');
           setIsUploading(false);
           addToast('视频状态查询失败', 'error');
-          clearInterval(pollId);
+          clearVideoPoll();
         }
       }, 2000);
     } catch {
       setUploadStatus('failed');
       addToast('上传视频失败', 'error');
       setIsUploading(false);
+      clearVideoPoll();
     }
   };
 
@@ -117,7 +133,7 @@ export default function AssetInputPanel() {
             </button>
             {uploadStatus === 'processing' && (
               <div style={{ fontSize: '0.85rem', color: 'var(--warning)', marginTop: '8px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <Loader2 size={14} className="animate-spin" /> 视频上传成功，转写处理中...
+                <Loader2 size={14} className="animate-spin" /> 视频上传成功，正在思考中...
               </div>
             )}
             {uploadStatus === 'success' && (

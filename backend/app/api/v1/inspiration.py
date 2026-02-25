@@ -27,7 +27,9 @@ async def post_inspiration_message(
     action: Literal[
         "continue",
         "confirm_prompt",
+        "confirm_allocation_plan",
         "confirm_assets",
+        "revise_allocation_plan",
         "revise_assets",
         "use_style_profile",
         "save_style",

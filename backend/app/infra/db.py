@@ -29,7 +29,9 @@ class Database:
             "inspiration_state": [
                 ("style_stage", "TEXT NOT NULL DEFAULT 'painting_style'"),
                 ("asset_candidates", "TEXT NOT NULL DEFAULT '{}'"),
+                ("allocation_plan", "TEXT NOT NULL DEFAULT '[]'"),
                 ("draft_style_id", "TEXT"),
+                ("requirement_ready", "INTEGER NOT NULL DEFAULT 1"),
                 ("transcript_seen_ids", "TEXT NOT NULL DEFAULT '[]'"),
                 ("updated_at", "TEXT NOT NULL DEFAULT ''"),
             ],

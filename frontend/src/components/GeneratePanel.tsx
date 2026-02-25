@@ -3,6 +3,59 @@ import { useAppStore } from '../store';
 import { useEffect, useState, useMemo } from 'react';
 import * as api from '../api';
 
+const STAGE_NAME_MAP: Record<string, string> = {
+  asset_extract: '素材提取',
+  asset_allocate: '内容分配',
+  prompt_generate: '提示词生成',
+  image_generate: '图片生成',
+  copy_generate: '文案生成',
+  finalize: '结果整理',
+};
+
+const CN_ORDINALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+
+function formatPromptLabel(index: number): string {
+  if (index >= 0 && index < CN_ORDINALS.length) {
+    return `第${CN_ORDINALS[index]}张`;
+  }
+  return `第${index + 1}张`;
+}
+
+function splitImagePrompts(stylePrompt: string, expectedCount?: number): string[] {
+  const normalized = stylePrompt.replace(/\r\n/g, '\n').trim();
+  if (!normalized) return [];
+
+  const numberedMatches = normalized.match(/第[一二三四五六七八九十0-9]+张[：:][\s\S]*?(?=第[一二三四五六七八九十0-9]+张[：:]|$)/g);
+  if (numberedMatches && numberedMatches.length > 0) {
+    return numberedMatches.map((item) => item.trim());
+  }
+
+  const oneByOneMatches = normalized.match(/生成一张[\s\S]*?(?=生成一张|$)/g);
+  if (oneByOneMatches && oneByOneMatches.length > 1) {
+    return oneByOneMatches.map((item) => item.trim());
+  }
+
+  const paragraphItems = normalized
+    .split(/\n{2,}/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (paragraphItems.length > 1) {
+    return paragraphItems;
+  }
+
+  if ((expectedCount || 0) > 1 && normalized.includes('\n')) {
+    const lineItems = normalized
+      .split('\n')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (lineItems.length >= (expectedCount || 0)) {
+      return lineItems;
+    }
+  }
+
+  return [normalized];
+}
+
 export default function GeneratePanel() {
   const { latestJob, startJob, cancelJob, pollJobStatus, activeSessionId, addToast, draft, latestStages, isStartingJob, latestAssetBreakdown } = useAppStore();
   const [stagesExpanded, setStagesExpanded] = useState(true);
@@ -43,14 +96,28 @@ export default function GeneratePanel() {
     return groups;
   }, [latestStages]);
 
+  const stylePayload = (draft?.style_payload as api.StylePayload | undefined) || undefined;
+  const allocationPlan = draft?.allocation_plan || [];
+  const stylePromptItems = useMemo(() => {
+    const stylePrompt = String(stylePayload?.style_prompt || '').trim();
+    return splitImagePrompts(stylePrompt, draft?.image_count);
+  }, [stylePayload?.style_prompt, draft?.image_count]);
+
   // Determine the "current" (most recent non-success) stage for highlighting
   const currentStageName = useMemo(() => {
     if (!groupedStages.length) return null;
+    const terminalJobStatus = new Set(['success', 'partial_success', 'failed', 'canceled']);
+    if (terminalJobStatus.has(status)) {
+      return null;
+    }
     for (let i = groupedStages.length - 1; i >= 0; i--) {
-      if (groupedStages[i].latest.status !== 'success' && groupedStages[i].latest.status !== 'partial_success') return groupedStages[i].stage;
+      const stageStatus = groupedStages[i].latest.status;
+      if (stageStatus !== 'success' && stageStatus !== 'partial_success' && stageStatus !== 'failed' && stageStatus !== 'canceled') {
+        return groupedStages[i].stage;
+      }
     }
     return null; // all success means done
-  }, [groupedStages]);
+  }, [groupedStages, status]);
 
   const handleStart = () => {
     if (!activeSessionId) {
@@ -105,7 +172,7 @@ export default function GeneratePanel() {
             <div style={{ fontSize: '0.85rem', color: 'var(--text-primary)', wordBreak: 'break-all' }}>
               {latestJob.error_message}
             </div>
-            {(latestJob.error_code === 'E-1004' || latestJob.error_message.includes('非图片内容')) && (
+            {(latestJob.error_message.includes('非图片内容') || latestJob.error_message.includes('上游未返回可用图片数据')) && (
               <div style={{ marginTop: '8px', fontSize: '0.85rem', color: 'var(--accent-color)', fontWeight: 500 }}>
                 💡 建议：当前生图模型返回非图片，请切换可用生图模型或检查提供商协议
               </div>
@@ -131,11 +198,17 @@ export default function GeneratePanel() {
                 const hasHistory = group.history.length > 0;
                 
                 // Use implicit success if an older stage is stuck but subsequent stages have started
-                const isImplicitSuccess = stage.status !== 'success' && stage.status !== 'failed' && stage.status !== 'partial_success' && i < groupedStages.length - 1;
+                const isImplicitSuccess =
+                  stage.status !== 'success' &&
+                  stage.status !== 'failed' &&
+                  stage.status !== 'partial_success' &&
+                  stage.status !== 'canceled' &&
+                  i < groupedStages.length - 1;
                 const isSuccessIcon = stage.status === 'success' || stage.status === 'partial_success' || isImplicitSuccess;
-                
-                const iconColor = isSuccessIcon ? 'var(--success)' : stage.status === 'failed' ? 'var(--error)' : 'var(--accent-color)';
-                const iconElement = isSuccessIcon ? '✓' : stage.status === 'failed' ? '✗' : <Loader2 size={14} className="animate-spin" />;
+                const isFailedIcon = stage.status === 'failed' || stage.status === 'canceled';
+
+                const iconColor = isSuccessIcon ? 'var(--success)' : isFailedIcon ? 'var(--error)' : 'var(--accent-color)';
+                const iconElement = isSuccessIcon ? '✓' : isFailedIcon ? '✗' : <Loader2 size={14} className="animate-spin" />;
 
                 return (
                   <div key={i} className={`stage-item ${isCurrent ? 'stage-current' : ''}`} style={{ flexDirection: 'column', alignItems: 'stretch' }}>
@@ -145,7 +218,7 @@ export default function GeneratePanel() {
                       </div>
                       <div style={{ flex: 1 }}>
                         <div style={{ fontWeight: isCurrent ? 700 : 500, color: isCurrent ? 'var(--accent-color)' : 'var(--text-primary)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <span>{stage.stage}</span>
+                          <span>{STAGE_NAME_MAP[stage.stage] || stage.stage}</span>
                           {hasHistory && <span style={{fontSize: '0.75rem', fontWeight: 'normal', color: 'var(--text-muted)'}}>{group.history.length + 1} 条记录</span>}
                         </div>
                         <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{stage.stage_message}</div>
@@ -202,14 +275,37 @@ export default function GeneratePanel() {
                     <span>{((draft.style_payload as api.StylePayload).extra_keywords || []).join('、')}</span>
                   </div>
                 ) : null}
-                {(draft.style_payload as api.StylePayload).style_prompt ? (
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+                {stylePromptItems.length > 0 ? (
+                  <div style={{ display: 'grid', gap: '8px', marginTop: '4px' }}>
                     <strong style={{ minWidth: '65px', color: 'var(--text-primary)' }}>母提示词：</strong>
-                    <span style={{ fontStyle: 'italic', opacity: 0.9 }}>
-                      {String((draft.style_payload as api.StylePayload).style_prompt).length > 50 
-                        ? String((draft.style_payload as api.StylePayload).style_prompt).substring(0, 50) + '...' 
-                        : String((draft.style_payload as api.StylePayload).style_prompt)}
-                    </span>
+                    <div
+                      style={{
+                        maxHeight: '180px',
+                        overflowY: 'auto',
+                        display: 'grid',
+                        gap: '8px',
+                        paddingRight: '4px',
+                      }}
+                    >
+                      {stylePromptItems.map((prompt, index) => (
+                        <div
+                          key={`${index}-${prompt.slice(0, 12)}`}
+                          style={{
+                            background: 'rgba(255, 255, 255, 0.03)',
+                            border: '1px solid var(--border-color)',
+                            borderRadius: '8px',
+                            padding: '8px',
+                          }}
+                        >
+                          <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
+                            {formatPromptLabel(index)}：
+                          </div>
+                          <div style={{ fontStyle: 'italic', opacity: 0.9, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                            {prompt}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -217,13 +313,27 @@ export default function GeneratePanel() {
             
             {(latestAssetBreakdown?.extracted?.foods?.length || latestAssetBreakdown?.extracted?.scenes?.length || latestAssetBreakdown?.extracted?.keywords?.length) ? (
               <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color)', fontSize: '0.85rem' }}>
-                <div style={{ marginBottom: '6px', color: 'var(--text-primary)', fontWeight: 500 }}>素材分配摘要：</div>
+                <div style={{ marginBottom: '6px', color: 'var(--text-primary)', fontWeight: 500 }}>提取结果摘要：</div>
                 <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                   {(latestAssetBreakdown.extracted?.foods || []).map((f: string, i: number) => <span key={`f-${i}`} style={{ padding: '2px 8px', background: 'rgba(234, 179, 8, 0.1)', color: '#eab308', borderRadius: '12px', fontSize: '0.75rem' }}>{f}</span>)}
                   {(latestAssetBreakdown.extracted?.scenes || []).map((s: string, i: number) => <span key={`s-${i}`} style={{ padding: '2px 8px', background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8', borderRadius: '12px', fontSize: '0.75rem' }}>{s}</span>)}
                 </div>
               </div>
             ) : null}
+
+            {allocationPlan.length > 0 && (
+              <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color)', fontSize: '0.85rem' }}>
+                <div style={{ marginBottom: '6px', color: 'var(--text-primary)', fontWeight: 500 }}>分图计划：</div>
+                <div style={{ display: 'grid', gap: '8px' }}>
+                  {allocationPlan.map((item) => (
+                    <div key={`allocation-${item.slot_index}-${item.focus_title}`} style={{ border: '1px solid var(--border-color)', borderRadius: '8px', padding: '8px', background: 'rgba(255,255,255,0.03)' }}>
+                      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>第{item.slot_index}张：{item.focus_title}</div>
+                      <div style={{ marginTop: '4px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>{item.focus_description}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="input" style={{ padding: '12px', fontSize: '0.9rem', color: 'var(--text-muted)' }}>

@@ -572,13 +572,14 @@ npm run build        # TypeScript 编译 + 构建
 
 ## 17. 提交检查清单
 
-每次代码变更前，请逐项确认：
+每次后端Python代码变更前，请逐项确认：
 
 - [ ] 单函数行数 < 200
 - [ ] 单文件行数 < 1000
 - [ ] 单文件夹文件数 ≤ 10
 - [ ] 所有文件 UTF-8 编码
-- [ ] 新增 / 修改接口已同步更新 `docs/OPENAPI.JSON`
+- [ ] 运行门禁脚本并检查通过：`python scripts/check_limits.py`
+- [ ] **任何后端代码修改前**，必须先更新 `docs/OPENAPI.JSON` 接口文档，以便前后端对齐。**绝对禁止先改代码后补文档！**
 - [ ] 后端测试 `pytest backend/tests -q` 全绿
 - [ ] 前端 `npm run lint` 零错误
 - [ ] 前端 `npm run build` 零错误

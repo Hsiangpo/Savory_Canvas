@@ -138,8 +138,40 @@ def test_generation_copy_prefers_model_output_when_available(client, monkeypatch
             return False
 
     def fake_urlopen(upstream_request, timeout=30):
-        assert timeout == 30
+        assert timeout in {30, 45}
         if upstream_request.full_url.endswith("/responses"):
+            request_body = upstream_request.data.decode("utf-8") if upstream_request.data else ""
+            if "资产提取助手" in request_body:
+                asset_payload = {
+                    "locations": ["呼和浩特"],
+                    "scenes": ["大召寺"],
+                    "foods": ["烧麦"],
+                    "keywords": ["城市美食"],
+                    "confidence": 0.9,
+                }
+                return FakeResponse({"output_text": json.dumps(asset_payload, ensure_ascii=False)})
+            if "提示词规划助手" in request_body:
+                selected_asset_id = ""
+                for line in request_body.splitlines():
+                    if "asset_id=" not in line:
+                        continue
+                    tail = line.split("asset_id=", 1)[1]
+                    selected_asset_id = tail.split(";", 1)[0].strip()
+                    if selected_asset_id:
+                        break
+                prompt_payload = {
+                    "items": [
+                        {
+                            "prompt_text": (
+                                "请只生成一张图片。\n"
+                                "重点呈现食材细节，突出主体质感与暖光氛围。\n"
+                                "强约束：禁止拼贴、禁止九宫格、禁止分镜、禁止多画面合成、禁止任何文字水印。"
+                            ),
+                            "asset_refs": [selected_asset_id] if selected_asset_id else [],
+                        }
+                    ]
+                }
+                return FakeResponse({"output_text": json.dumps(prompt_payload, ensure_ascii=False)})
             copy_payload = {
                 "title": "电影感牛排内容发布指南",
                 "intro": "本轮图像呈现了高对比暖光与牛排质感，适合做高完成度餐饮内容发布。",
@@ -201,6 +233,77 @@ def test_generation_prompt_ignores_non_visual_style_keys(client):
     assert "force_partial_fail" not in prompt_text
 
 
+def test_build_prompt_specs_prefers_confirmed_allocation_plan(client, monkeypatch):
+    worker = client.app.state.services.generation.worker
+    breakdown = {
+        "source_assets": [
+            {"asset_id": "asset-a", "asset_type": "text", "content": "西安钟楼路线"},
+            {"asset_id": "asset-b", "asset_type": "text", "content": "肉夹馍与冰峰"},
+        ],
+        "extracted": {
+            "foods": ["肉夹馍", "冰峰"],
+            "scenes": ["钟楼"],
+            "keywords": ["西安"],
+        },
+    }
+    style = {
+        "style_payload": {
+            "allocation_plan": [
+                {
+                    "slot_index": 1,
+                    "focus_title": "景点主图",
+                    "focus_description": "聚焦钟楼与城市路线。",
+                    "locations": ["西安"],
+                    "scenes": ["钟楼"],
+                    "foods": [],
+                    "keywords": ["路线"],
+                    "source_asset_ids": ["asset-a"],
+                    "confirmed": True,
+                },
+                {
+                    "slot_index": 2,
+                    "focus_title": "美食主图",
+                    "focus_description": "聚焦肉夹馍与冰峰。",
+                    "locations": ["西安"],
+                    "scenes": [],
+                    "foods": ["肉夹馍", "冰峰"],
+                    "keywords": ["美食"],
+                    "source_asset_ids": ["asset-b"],
+                    "confirmed": True,
+                },
+            ]
+        }
+    }
+
+    def fail_if_prompt_plan(*, system_prompt, **_kwargs):
+        if "提示词规划助手" in system_prompt:
+            raise AssertionError("已确认分图方案时不应再调用提示词规划模型")
+        return json.dumps(
+            {
+                "title": "占位",
+                "intro": "占位",
+                "guide_sections": [{"heading": "占位", "content": "占位"}],
+                "ending": "占位",
+                "full_text": "占位",
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(worker, "_call_text_model_for_copy", fail_if_prompt_plan)
+
+    specs = worker._build_prompt_specs(
+        image_count=2,
+        breakdown=breakdown,
+        style=style,
+        content_mode="food_scenic",
+    )
+    assert len(specs) == 2
+    assert "钟楼" in specs[0]["prompt_text"]
+    assert "肉夹馍" in specs[1]["prompt_text"]
+    assert specs[0]["asset_refs"] == ["asset-a"]
+    assert specs[1]["asset_refs"] == ["asset-b"]
+
+
 @pytest.mark.image_pipeline_real
 def test_generate_image_binary_retry_without_references_when_upstream_rejects(client, monkeypatch):
     worker = client.app.state.services.generation.worker
@@ -229,7 +332,7 @@ def test_generate_image_binary_retry_without_references_when_upstream_rejects(cl
     assert "input_images" not in payloads[1]
 
 
-def test_collect_style_reference_paths_includes_sample_and_named_reference_assets(client):
+def test_collect_style_reference_paths_only_uses_style_reference_sources(client):
     worker = client.app.state.services.generation.worker
     session = create_session(client, title="参考图识别会话", content_mode="food")
     file_path_a = client.app.state.storage.save_image(f"{session['id']}_sample_a.png", base64.b64decode(PNG_BASE64))
@@ -300,5 +403,100 @@ def test_collect_style_reference_paths_includes_sample_and_named_reference_asset
         allow_image_reference=True,
     )
     assert file_path_a in refs
-    assert file_path_b not in refs
     assert file_path_c in refs
+    assert file_path_b not in refs
+
+
+def test_generation_copy_failure_keeps_partial_images(client, monkeypatch):
+    setup_model_routing(client)
+    session = create_session(client, title="文案失败保留图片", content_mode="food")
+    asset_response = client.post(
+        "/api/v1/assets/text",
+        json={
+            "session_id": session["id"],
+            "asset_type": "text",
+            "content": "西安羊肉泡馍与钟楼夜景",
+        },
+    )
+    assert asset_response.status_code == 201
+    style = create_style(client, session["id"], {"painting_style": ["手绘插画"]})
+
+    worker = client.app.state.services.generation.worker
+    worker_module = _import_generation_worker_module()
+
+    def fake_generate_copy_result(*args, **kwargs):
+        raise worker_module.DomainError(code="E-1004", message="文案生成失败：上游超时", status_code=503)
+
+    monkeypatch.setattr(worker, "_generate_copy_result", fake_generate_copy_result)
+
+    job = create_generation_job(client, session["id"], style["id"], image_count=1)
+    ended = wait_for_job_end(client, job["id"])
+    assert ended["status"] == "partial_success"
+    assert ended["error_code"] == "E-1004"
+    assert "文案生成失败" in (ended.get("error_message") or "")
+
+    result_response = client.get(f"/api/v1/jobs/{job['id']}/results")
+    assert result_response.status_code == 200
+    payload = result_response.json()
+    assert payload["images"]
+    assert payload["copy"]["title"] == ""
+
+
+def test_generation_copy_result_retries_with_strict_json_prompt(client, monkeypatch):
+    worker = client.app.state.services.generation.worker
+    call_history: list[str] = []
+
+    def fake_resolve_provider():
+        return (
+            {
+                "id": "provider-copy-retry",
+                "base_url": "https://copy-retry.local/v1",
+                "api_key": "copy-retry-key",
+                "api_protocol": "responses",
+            },
+            "gpt-4.1-mini",
+        )
+
+    def fake_call_text_model_for_copy(*, provider, model_name, system_prompt, user_prompt):
+        call_history.append(system_prompt)
+        if len(call_history) == 1:
+            return "文案输出失败，需要重试"
+        return json.dumps(
+            {
+                "title": "西安双图发布方案",
+                "intro": "本次内容围绕西安景点与美食双主题展开，风格统一且叙事清晰。",
+                "guide_sections": [
+                    {"heading": "景点图重点", "content": "第一张聚焦钟楼与城市动线，通过手账布局强化路线可读性与地标识别。"},
+                    {"heading": "美食图重点", "content": "第二张突出肉夹馍与冰峰细节，加入手绘标签与信息块增强食欲表达。"},
+                    {"heading": "发布建议", "content": "文案建议按路线先后组织，结尾加入实用建议与互动问题提升收藏率。"},
+                ],
+                "ending": "保持统一复古手账语气与色调，有利于账号视觉一致性沉淀。",
+                "full_text": "西安双图发布方案\n...",
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(worker, "_resolve_text_model_provider", fake_resolve_provider)
+    monkeypatch.setattr(worker, "_call_text_model_for_copy", fake_call_text_model_for_copy)
+
+    result = worker._generate_copy_result(
+        job={"id": "job-copy-retry"},
+        style={"name": "复古旅行手账风格", "style_payload": {"painting_style": "手绘水彩"}},
+        images=[
+            {"image_index": 1, "prompt_text": "生成一张西安景点主题海报"},
+            {"image_index": 2, "prompt_text": "生成一张西安美食主题海报"},
+        ],
+        content_mode="food_scenic",
+        breakdown={
+            "extracted": {
+                "foods": ["肉夹馍", "冰峰"],
+                "scenes": ["钟楼", "兵马俑"],
+                "keywords": ["西安", "路线"],
+            }
+        },
+    )
+
+    assert result["title"] == "西安双图发布方案"
+    assert len(result["guide_sections"]) >= 3
+    assert len(call_history) == 2
+    assert "必须只输出一个 JSON 对象" in call_history[1]

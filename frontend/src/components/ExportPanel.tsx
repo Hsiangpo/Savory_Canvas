@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { File, Image as ImageIcon, Loader2 } from 'lucide-react';
 import { useAppStore } from '../store';
 import * as api from '../api';
@@ -7,6 +7,20 @@ export default function ExportPanel() {
   const { activeSessionId, latestJob, addToast } = useAppStore();
   const [isExporting, setIsExporting] = useState(false);
   const [exportType, setExportType] = useState<'long_image' | 'pdf' | null>(null);
+  const exportPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const clearExportPoll = () => {
+    if (exportPollRef.current) {
+      clearInterval(exportPollRef.current);
+      exportPollRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      clearExportPoll();
+    };
+  }, []);
 
   const canExport = activeSessionId && latestJob && (latestJob.status === 'success' || latestJob.status === 'partial_success');
 
@@ -15,6 +29,7 @@ export default function ExportPanel() {
 
     setIsExporting(true);
     setExportType(format);
+    clearExportPoll();
 
     try {
       const task = await api.createExport({
@@ -23,13 +38,13 @@ export default function ExportPanel() {
         export_format: format
       });
 
-      const pollId = setInterval(async () => {
+      exportPollRef.current = setInterval(async () => {
         try {
           const exportTask = await api.getExport(task.id);
           if (exportTask.status === 'success') {
             setIsExporting(false);
             setExportType(null);
-            clearInterval(pollId);
+            clearExportPoll();
             if (exportTask.file_url) {
               window.open(exportTask.file_url, '_blank');
               addToast('导出文件已打开', 'success');
@@ -39,19 +54,20 @@ export default function ExportPanel() {
           } else if (exportTask.status === 'failed') {
             setIsExporting(false);
             setExportType(null);
-            clearInterval(pollId);
+            clearExportPoll();
             addToast(`导出失败: ${exportTask.error_message || '未知错误'}`, 'error');
           }
         } catch {
           setIsExporting(false);
           setExportType(null);
-          clearInterval(pollId);
+          clearExportPoll();
           addToast('获取状态失败', 'error');
         }
       }, 2000);
     } catch {
       setIsExporting(false);
       setExportType(null);
+      clearExportPoll();
       addToast('创建任务失败', 'error');
     }
   };

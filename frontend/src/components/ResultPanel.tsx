@@ -64,6 +64,7 @@ export default function ResultPanel() {
   const [previewModal, setPreviewModal] = useState<{ url: string; title?: string } | null>(null);
   const [previewLoadFailed, setPreviewLoadFailed] = useState(false);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const copySectionRef = useRef<HTMLDivElement | null>(null);
 
   const isRunning = latestJob?.status === 'running' || latestJob?.status === 'queued';
   const isSuccess = latestJob?.status === 'success' || latestJob?.status === 'partial_success';
@@ -100,10 +101,25 @@ export default function ResultPanel() {
     return '';
   }, [latestJob?.error_message, latestStages]);
 
+  const scrollToCopySection = () => {
+    if (!contentRef.current || !copySectionRef.current) return;
+    const container = contentRef.current;
+    const target = copySectionRef.current;
+    const top = target.offsetTop - 8;
+    container.scrollTo({ top: top > 0 ? top : 0, behavior: 'smooth' });
+  };
+
   useEffect(() => {
     if (!isSuccess || !latestResult) return;
     if (!contentRef.current) return;
-    contentRef.current.scrollTo({ top: 0, behavior: 'auto' });
+    const container = contentRef.current;
+    // 等待 DOM 更新后再回顶，避免被后续渲染覆盖滚动位置。
+    requestAnimationFrame(() => {
+      container.scrollTo({ top: 0, behavior: 'auto' });
+      requestAnimationFrame(() => {
+        container.scrollTo({ top: 0, behavior: 'auto' });
+      });
+    });
   }, [isSuccess, latestResult, resultSnapshotKey]);
 
   useEffect(() => {
@@ -132,6 +148,49 @@ export default function ResultPanel() {
       </div>
 
       <div className="panel-content" ref={contentRef}>
+        {isSuccess && (
+          <div
+            style={{
+              position: 'sticky',
+              top: 0,
+              zIndex: 3,
+              marginTop: '-8px',
+              padding: '10px 12px',
+              borderRadius: '8px',
+              border: '1px solid var(--border-color)',
+              background: 'rgba(18, 18, 20, 0.96)',
+              backdropFilter: 'blur(4px)',
+            }}
+          >
+            {hasCopy ? (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: '0.82rem', color: 'var(--accent-color)', marginBottom: '2px' }}>文案已生成</div>
+                  <div
+                    style={{
+                      fontSize: '0.86rem',
+                      color: 'var(--text-secondary)',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                    title={latestResult?.copy?.title || ''}
+                  >
+                    {latestResult?.copy?.title || '点击右侧按钮查看完整文案'}
+                  </div>
+                </div>
+                <button className="btn btn-secondary" style={{ padding: '6px 10px', flexShrink: 0 }} onClick={scrollToCopySection}>
+                  查看完整文案
+                </button>
+              </div>
+            ) : (
+              <div style={{ fontSize: '0.86rem', color: copyFailureReason ? 'var(--error)' : 'var(--text-secondary)' }}>
+                {copyFailureReason ? `文案生成异常：${copyFailureReason}` : '文案尚未返回，正在同步结果。'}
+              </div>
+            )}
+          </div>
+        )}
+
         {!isRunning && !isSuccess && (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
             暂无结果，请调整配置后点击生成
@@ -172,7 +231,7 @@ export default function ResultPanel() {
               </div>
             )}
 
-            <div className="copy-section" style={{ marginBottom: '16px' }}>
+            <div className="copy-section" style={{ marginBottom: '16px' }} ref={copySectionRef}>
                 <button className="copy-section-header" onClick={() => setCopyExpanded(!copyExpanded)}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <FileText size={16} color="var(--accent-color)" />

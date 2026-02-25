@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Image as ImageIcon, FileText, Component, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAppStore } from '../store';
 import type { ImageResult } from '../api';
@@ -63,6 +63,7 @@ export default function ResultPanel() {
   const [copyExpanded, setCopyExpanded] = useState(true);
   const [previewModal, setPreviewModal] = useState<{ url: string; title?: string } | null>(null);
   const [previewLoadFailed, setPreviewLoadFailed] = useState(false);
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
   const isRunning = latestJob?.status === 'running' || latestJob?.status === 'queued';
   const isSuccess = latestJob?.status === 'success' || latestJob?.status === 'partial_success';
@@ -81,6 +82,13 @@ export default function ResultPanel() {
 
   const hasCopy = latestResult?.copy && (latestResult.copy.title || latestResult.copy.intro || latestResult.copy.full_text);
   const hasSections = (latestResult?.copy?.guide_sections?.length ?? 0) > 0;
+  const resultSnapshotKey = [
+    latestResult?.job_id ?? '',
+    latestResult?.images?.length ?? 0,
+    latestResult?.copy?.full_text ?? '',
+    latestResult?.copy?.intro ?? '',
+    latestResult?.copy?.guide_sections?.length ?? 0,
+  ].join('|');
   const copyFailureReason = useMemo(() => {
     if (latestJob?.error_message && latestJob.error_message.includes('文案生成失败')) {
       return latestJob.error_message;
@@ -91,6 +99,12 @@ export default function ResultPanel() {
     if (latestCopy.status === 'failed') return latestCopy.stage_message || '文案生成失败';
     return '';
   }, [latestJob?.error_message, latestStages]);
+
+  useEffect(() => {
+    if (!isSuccess || !latestResult) return;
+    if (!contentRef.current) return;
+    contentRef.current.scrollTo({ top: 0, behavior: 'auto' });
+  }, [isSuccess, latestResult, resultSnapshotKey]);
 
   useEffect(() => {
     if (!previewModal) return;
@@ -117,7 +131,7 @@ export default function ResultPanel() {
         )}
       </div>
 
-      <div className="panel-content">
+      <div className="panel-content" ref={contentRef}>
         {!isRunning && !isSuccess && (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
             暂无结果，请调整配置后点击生成
@@ -155,51 +169,6 @@ export default function ResultPanel() {
               <div style={{ marginBottom: '16px', padding: '12px', borderRadius: '8px', backgroundColor: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.2)', color: 'var(--text-primary)', fontSize: '0.9rem' }}>
                 <strong style={{ color: 'var(--accent-color)' }}>部分成功：</strong>
                 已生成 {latestResult.images?.length || 0}/{draft?.image_count ?? '-'} 张图。上游失败导致部分缺失。
-              </div>
-            )}
-
-            {latestAssetBreakdown && (
-              <div className="asset-breakdown" style={{ marginBottom: '16px', padding: '14px', backgroundColor: 'var(--bg-glass-hover)', borderRadius: '8px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', color: 'var(--text-primary)' }}>
-                   <Component size={16} color="var(--accent-color)" />
-                   <h3 style={{ margin: 0, fontSize: '1rem' }}>素材拆解结果</h3>
-                </div>
-                {(!latestAssetBreakdown.extracted?.foods?.length && !latestAssetBreakdown.extracted?.scenes?.length && !latestAssetBreakdown.extracted?.keywords?.length) ? (
-                  <div style={{ color: 'var(--text-muted)' }}>暂无拆解结果</div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    {(latestAssetBreakdown.extracted?.foods?.length ?? 0) > 0 && (
-                      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
-                        <strong style={{ color: 'var(--text-secondary)', minWidth: '50px', fontSize: '0.85rem' }}>美食:</strong>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                           {latestAssetBreakdown.extracted?.foods?.map((food, i) => (
-                             <span key={i} className="tag-badge">{food}</span>
-                           ))}
-                        </div>
-                      </div>
-                    )}
-                    {(latestAssetBreakdown.extracted?.scenes?.length ?? 0) > 0 && (
-                      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
-                        <strong style={{ color: 'var(--text-secondary)', minWidth: '50px', fontSize: '0.85rem' }}>场景:</strong>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                           {latestAssetBreakdown.extracted?.scenes?.map((scene, i) => (
-                             <span key={i} className="tag-badge">{scene}</span>
-                           ))}
-                        </div>
-                      </div>
-                    )}
-                    {(latestAssetBreakdown.extracted?.keywords?.length ?? 0) > 0 && (
-                      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
-                        <strong style={{ color: 'var(--text-secondary)', minWidth: '50px', fontSize: '0.85rem' }}>关键词:</strong>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                           {latestAssetBreakdown.extracted?.keywords?.map((kw, i) => (
-                             <span key={i} className="tag-badge">{kw}</span>
-                           ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             )}
 
@@ -253,6 +222,51 @@ export default function ResultPanel() {
                   </div>
                 )}
               </div>
+
+            {latestAssetBreakdown && (
+              <div className="asset-breakdown" style={{ marginBottom: '16px', padding: '14px', backgroundColor: 'var(--bg-glass-hover)', borderRadius: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', color: 'var(--text-primary)' }}>
+                   <Component size={16} color="var(--accent-color)" />
+                   <h3 style={{ margin: 0, fontSize: '1rem' }}>素材拆解结果</h3>
+                </div>
+                {(!latestAssetBreakdown.extracted?.foods?.length && !latestAssetBreakdown.extracted?.scenes?.length && !latestAssetBreakdown.extracted?.keywords?.length) ? (
+                  <div style={{ color: 'var(--text-muted)' }}>暂无拆解结果</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {(latestAssetBreakdown.extracted?.foods?.length ?? 0) > 0 && (
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                        <strong style={{ color: 'var(--text-secondary)', minWidth: '50px', fontSize: '0.85rem' }}>美食:</strong>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                           {latestAssetBreakdown.extracted?.foods?.map((food, i) => (
+                             <span key={i} className="tag-badge">{food}</span>
+                           ))}
+                        </div>
+                      </div>
+                    )}
+                    {(latestAssetBreakdown.extracted?.scenes?.length ?? 0) > 0 && (
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                        <strong style={{ color: 'var(--text-secondary)', minWidth: '50px', fontSize: '0.85rem' }}>场景:</strong>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                           {latestAssetBreakdown.extracted?.scenes?.map((scene, i) => (
+                             <span key={i} className="tag-badge">{scene}</span>
+                           ))}
+                        </div>
+                      </div>
+                    )}
+                    {(latestAssetBreakdown.extracted?.keywords?.length ?? 0) > 0 && (
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'baseline' }}>
+                        <strong style={{ color: 'var(--text-secondary)', minWidth: '50px', fontSize: '0.85rem' }}>关键词:</strong>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                           {latestAssetBreakdown.extracted?.keywords?.map((kw, i) => (
+                             <span key={i} className="tag-badge">{kw}</span>
+                           ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="result-grid" style={{ marginBottom: '16px' }}>
               {latestResult.images?.map((img, i) => (

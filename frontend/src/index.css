@@ -276,6 +276,16 @@ h6 {
   background: rgba(255,255,255,0.02);
 }
 
+.copy-section-header-static {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid var(--border-color);
+}
+
 .copy-section-body {
   padding: 0 16px 16px 16px;
   display: flex;
@@ -283,10 +293,22 @@ h6 {
   gap: 14px;
 }
 
+.copy-section-body-scrollable {
+  max-height: 460px;
+  overflow-y: auto;
+}
+
 .copy-block {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.copy-title {
+  font-size: 1.05rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 .copy-label {

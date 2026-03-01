@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Copy, Image as ImageIcon, FileText, Component, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
+import { Copy, Image as ImageIcon, FileText, Component, RefreshCw } from 'lucide-react';
 import { useAppStore } from '../store';
 import type { ImageResult } from '../api';
 
@@ -60,7 +60,6 @@ function ResultImage(
 
 export default function ResultPanel() {
   const { latestJob, latestResult, latestAssetBreakdown, latestStages, addToast, draft } = useAppStore();
-  const [copyExpanded, setCopyExpanded] = useState(true);
   const [previewModal, setPreviewModal] = useState<{ url: string; title?: string } | null>(null);
   const [previewLoadFailed, setPreviewLoadFailed] = useState(false);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -225,54 +224,56 @@ export default function ResultPanel() {
             )}
 
             <div className="copy-section" style={{ marginBottom: '16px' }}>
-              <button className="copy-section-header" onClick={() => setCopyExpanded(!copyExpanded)}>
+              <div className="copy-section-header-static">
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <FileText size={16} color="var(--accent-color)" />
-                  <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-primary)' }}>
-                    {latestResult.copy?.title || '文案结果'}
-                  </h3>
+                  <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-primary)' }}>图文文案</h3>
                 </div>
-                {copyExpanded ? <ChevronUp size={16} color="var(--text-secondary)" /> : <ChevronDown size={16} color="var(--text-secondary)" />}
-              </button>
+              </div>
 
-              {copyExpanded && (
-                <div className="copy-section-body">
-                  {hasCopy && latestResult.copy?.intro && (
-                    <div className="copy-block">
-                      <span className="copy-label">导语</span>
-                      <p className="copy-paragraph">{latestResult.copy.intro}</p>
-                    </div>
-                  )}
+              <div className="copy-section-body copy-section-body-scrollable">
+                {hasCopy && latestResult.copy?.title && (
+                  <div className="copy-block">
+                    <span className="copy-label">标题</span>
+                    <p className="copy-paragraph copy-title">{latestResult.copy.title}</p>
+                  </div>
+                )}
 
-                  {hasCopy && hasSections && latestResult.copy?.guide_sections?.map((sec, i) => (
-                    <div key={i} className="copy-block">
-                      <span className="copy-label">{sec.heading}</span>
-                      <p className="copy-paragraph">{sec.content}</p>
-                    </div>
-                  ))}
+                {hasCopy && latestResult.copy?.intro && (
+                  <div className="copy-block">
+                    <span className="copy-label">导语</span>
+                    <p className="copy-paragraph">{latestResult.copy.intro}</p>
+                  </div>
+                )}
 
-                  {hasCopy && latestResult.copy?.ending && (
-                    <div className="copy-block" style={{ borderLeft: '3px solid var(--accent-color)', paddingLeft: '12px' }}>
-                      <span className="copy-label">结语</span>
-                      <p className="copy-paragraph" style={{ fontStyle: 'italic', opacity: 0.9 }}>{latestResult.copy.ending}</p>
-                    </div>
-                  )}
+                {hasCopy && hasSections && latestResult.copy?.guide_sections?.map((sec, i) => (
+                  <div key={i} className="copy-block">
+                    <span className="copy-label">{sec.heading}</span>
+                    <p className="copy-paragraph">{sec.content}</p>
+                  </div>
+                ))}
 
-                  {!hasCopy && (
-                    <div style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
-                      {copyFailureReason ? (
-                        <div style={{ color: 'var(--error)' }}>
-                          文案生成失败：{copyFailureReason}。当前已保留图片结果，可先使用图片。
-                        </div>
-                      ) : (
-                        <div style={{ color: 'var(--text-muted)' }}>
-                          文案暂未生成，请稍后重试或重新发起任务。
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
+                {hasCopy && latestResult.copy?.ending && (
+                  <div className="copy-block" style={{ borderLeft: '3px solid var(--accent-color)', paddingLeft: '12px' }}>
+                    <span className="copy-label">结语</span>
+                    <p className="copy-paragraph" style={{ fontStyle: 'italic', opacity: 0.9 }}>{latestResult.copy.ending}</p>
+                  </div>
+                )}
+
+                {!hasCopy && (
+                  <div style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
+                    {copyFailureReason ? (
+                      <div style={{ color: 'var(--error)' }}>
+                        文案生成失败：{copyFailureReason}。当前已保留图片结果，可先使用图片。
+                      </div>
+                    ) : (
+                      <div style={{ color: 'var(--text-muted)' }}>
+                        文案暂未生成，请稍后重试或重新发起任务。
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="result-grid" style={{ marginBottom: '16px' }}>

@@ -706,10 +706,9 @@ class GenerationPipelineMixin(ImageRequestMixin):
         foods = "、".join(extracted.get("foods") or []) or "无"
         scenes = "、".join(extracted.get("scenes") or []) or "无"
         keywords = "、".join(extracted.get("keywords") or []) or "无"
-        prompt_preview = "\n".join(
-            f"- 图{item['image_index']}：{item.get('prompt_text', '')[:120]}"
-            for item in images[:3]
-        )
+        image_count = len(images)
+        sections = [str(item.get("heading") or "").strip() for item in (style.get("style_payload") or {}).get("copy_sections") or []]
+        section_text = "、".join(item for item in sections if item) or "看点、路线、实操建议、避坑提示"
         return (
             f"风格名称：{style.get('name', '未命名风格')}\n"
             f"风格配置：{self._format_style_payload(style.get('style_payload') or {})}\n"
@@ -717,9 +716,11 @@ class GenerationPipelineMixin(ImageRequestMixin):
             f"提取食材：{foods}\n"
             f"提取场景：{scenes}\n"
             f"关键词：{keywords}\n"
-            f"图片提示词摘要：\n{prompt_preview}\n"
-            f"总图片数量：{len(images)}\n"
-            "请生成可直接发布的完整图文文案。"
+            f"配图数量：{image_count}\n"
+            f"建议章节方向：{section_text}\n"
+            "文案目标：围绕地点/景点/美食这些资产写可发布攻略，不要写成“图片说明”。\n"
+            "禁止出现“第一张图/第二张图/本图/画面里”等描述图像的措辞。\n"
+            "请直接输出可发布图文文案。"
         )
 
     def _call_text_model_for_copy(

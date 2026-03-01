@@ -82,28 +82,16 @@ class ExportWorker:
         )
 
     def _build_pdf_bytes(self, *, images: list[dict[str, Any]], copy_result: dict[str, Any]) -> bytes:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageFont
 
         page_width = 1240
         page_height = 1754
         margin = 72
-        title_font = self._load_font(size=52, bold=True, fallback=ImageFont)
         section_font = self._load_font(size=34, bold=True, fallback=ImageFont)
         text_font = self._load_font(size=28, bold=False, fallback=ImageFont)
         small_font = self._load_font(size=24, bold=False, fallback=ImageFont)
 
         pages: list[Image.Image] = []
-        pages.append(
-            self._build_cover_page(
-                page_width=page_width,
-                page_height=page_height,
-                margin=margin,
-                title_font=title_font,
-                section_font=section_font,
-                text_font=text_font,
-                copy_result=copy_result,
-            )
-        )
         pages.extend(
             self._build_image_pages(
                 page_width=page_width,
@@ -132,41 +120,6 @@ class ExportWorker:
         first_page.save(buffer, format="PDF", save_all=True, append_images=append_pages, resolution=150.0)
         return buffer.getvalue()
 
-    def _build_cover_page(
-        self,
-        *,
-        page_width: int,
-        page_height: int,
-        margin: int,
-        title_font,
-        section_font,
-        text_font,
-        copy_result: dict[str, Any],
-    ):
-        from PIL import Image, ImageDraw
-
-        page = Image.new("RGB", (page_width, page_height), "#f7f3ea")
-        draw = ImageDraw.Draw(page)
-        title = str(copy_result.get("title") or "Savory Canvas 导出结果").strip()
-        intro = str(copy_result.get("intro") or "").strip()
-        draw.rectangle((margin, margin, page_width - margin, margin + 8), fill="#f97352")
-        y = margin + 36
-        y = self._draw_wrapped_text(draw, title, title_font, margin, y, page_width - margin, "#1f1f1f", 1.45)
-        y += 18
-        draw.text((margin, y), "导语", font=section_font, fill="#f97352")
-        y += 56
-        self._draw_wrapped_text(
-            draw,
-            intro or "本次导出包含生成图片与结构化文案内容。",
-            text_font,
-            margin,
-            y,
-            page_width - margin,
-            "#2d2d2d",
-            1.6,
-        )
-        return page
-
     def _build_image_pages(
         self,
         *,
@@ -181,40 +134,23 @@ class ExportWorker:
         from PIL import Image, ImageDraw
 
         pages: list[Image.Image] = []
-        total = len(images)
-        for index, item in enumerate(images, start=1):
+        for item in images:
             page = Image.new("RGB", (page_width, page_height), "#ffffff")
-            draw = ImageDraw.Draw(page)
-            draw.text((margin, margin), f"生成结果 {index}/{total}", font=section_font, fill="#1f1f1f")
             image_path = self._resolve_image_file_path(item.get("image_path"))
             if image_path and image_path.is_file():
                 with Image.open(image_path) as raw:
                     image = raw.convert("RGB")
                 max_width = page_width - margin * 2
-                max_height = page_height - 520
+                max_height = page_height - margin * 2
                 ratio = min(max_width / image.width, max_height / image.height)
                 resized = image.resize((max(1, int(image.width * ratio)), max(1, int(image.height * ratio))))
                 paste_x = (page_width - resized.width) // 2
-                paste_y = margin + 90
+                paste_y = (page_height - resized.height) // 2
                 page.paste(resized, (paste_x, paste_y))
-                y = paste_y + resized.height + 40
             else:
+                draw = ImageDraw.Draw(page)
                 y = margin + 140
                 draw.text((margin, y), "图片文件不存在，已跳过渲染。", font=text_font, fill="#d9464a")
-                y += 70
-            prompt = str(item.get("prompt_text") or "").strip()
-            draw.text((margin, y), "生图提示词摘要", font=small_font, fill="#f97352")
-            y += 44
-            self._draw_wrapped_text(
-                draw,
-                self._truncate_text(prompt, max_chars=220),
-                text_font,
-                margin,
-                y,
-                page_width - margin,
-                "#2d2d2d",
-                1.55,
-            )
             pages.append(page)
         return pages
 
@@ -235,9 +171,13 @@ class ExportWorker:
         page = Image.new("RGB", (page_width, page_height), "#fffdfa")
         draw = ImageDraw.Draw(page)
         y = margin
-        draw.text((margin, y), "图文文案", font=section_font, fill="#1f1f1f")
-        y += 64
-        blocks: list[tuple[str, str]] = [("导语", str(copy_result.get("intro") or "").strip())]
+        blocks: list[tuple[str, str]] = []
+        title = str(copy_result.get("title") or "").strip()
+        if title:
+            blocks.append(("标题", title))
+        intro = str(copy_result.get("intro") or "").strip()
+        if intro:
+            blocks.append(("导语", intro))
         sections = copy_result.get("guide_sections")
         if isinstance(sections, list):
             for idx, section in enumerate(sections, start=1):
@@ -246,7 +186,11 @@ class ExportWorker:
                 heading = str(section.get("heading") or f"段落 {idx}").strip()
                 content = str(section.get("content") or "").strip()
                 blocks.append((heading, content))
-        blocks.append(("结语", str(copy_result.get("ending") or "").strip()))
+        ending = str(copy_result.get("ending") or "").strip()
+        if ending:
+            blocks.append(("结语", ending))
+        if not blocks:
+            blocks.append(("文案", "无"))
 
         for title, content in blocks:
             estimated_line_height = int(getattr(text_font, "size", 28) * 1.6)
@@ -257,8 +201,6 @@ class ExportWorker:
                 page = Image.new("RGB", (page_width, page_height), "#fffdfa")
                 draw = ImageDraw.Draw(page)
                 y = margin
-                draw.text((margin, y), "图文文案（续）", font=small_font, fill="#a45f2a")
-                y += 56
             draw.text((margin, y), title, font=small_font, fill="#f97352")
             y += 38
             y = self._draw_wrapped_text(draw, content or "无", text_font, margin, y, page_width - margin, "#2d2d2d", 1.6)
@@ -295,12 +237,6 @@ class ExportWorker:
             draw.text((x, y), current or " ", font=font, fill=fill)
             y += line_height
         return y
-
-    def _truncate_text(self, text: str, *, max_chars: int) -> str:
-        normalized = str(text or "").strip()
-        if len(normalized) <= max_chars:
-            return normalized
-        return normalized[:max_chars].rstrip() + "…"
 
     def _resolve_image_file_path(self, image_path: Any) -> Path | None:
         if not isinstance(image_path, str) or not image_path.strip():

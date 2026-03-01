@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from urllib import error as url_error
 from urllib import request
@@ -129,18 +130,7 @@ class ModelService:
 
     def _infer_capabilities(self, model_name: str) -> list[str]:
         lowered = model_name.lower()
-        image_generation_markers = {
-            "dall-e",
-            "gpt-image",
-            "nano-banana",
-            "midjourney",
-            "stable-diffusion",
-            "sdxl",
-            "flux",
-            "imagen",
-            "kandinsky",
-        }
-        if any(marker in lowered for marker in image_generation_markers):
+        if self._is_image_generation_model(lowered):
             return ["image_generation"]
 
         vision_markers = {
@@ -161,6 +151,47 @@ class ModelService:
         if any(marker in lowered for marker in vision_markers):
             capabilities.append("vision")
         return capabilities
+
+    def _is_image_generation_model(self, lowered_model_name: str) -> bool:
+        video_only_markers = {
+            "t2v",
+            "i2v",
+            "v2v",
+            "video",
+            "seedance",
+            "kling",
+            "sora",
+        }
+        if any(marker in lowered_model_name for marker in video_only_markers):
+            return False
+
+        image_generation_markers = {
+            "dall-e",
+            "gpt-image",
+            "nano-banana",
+            "midjourney",
+            "stable-diffusion",
+            "sdxl",
+            "flux",
+            "imagen",
+            "kandinsky",
+            "qwen-image",
+            "seedream",
+            "seededit",
+            "wanx-image",
+            "cogview",
+            "hunyuan-image",
+        }
+        if any(marker in lowered_model_name for marker in image_generation_markers):
+            return True
+
+        if re.search(r"(^|[-_/])(t2i|i2i|txt2img|img2img)([-_/]|$)", lowered_model_name):
+            return True
+        if "text-to-image" in lowered_model_name or "image-to-image" in lowered_model_name:
+            return True
+        if "image-edit" in lowered_model_name or "image_edit" in lowered_model_name:
+            return True
+        return False
 
     def _merge_capabilities(self, upstream_capabilities: list[str], inferred_capabilities: list[str]) -> list[str]:
         merged = set(upstream_capabilities) | set(inferred_capabilities)

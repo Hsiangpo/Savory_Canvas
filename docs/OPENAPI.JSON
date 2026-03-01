@@ -1446,6 +1446,37 @@
           },
           "style_payload": {
             "$ref": "#/components/schemas/StylePayload"
+          },
+          "sample_image_asset_ids": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Image Asset Ids",
+            "description": "当前风格上下文中的样例图素材ID列表"
+          },
+          "sample_image_preview_urls": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Image Preview Urls",
+            "description": "当前风格上下文中的样例图预览URL列表"
           }
         }
       },
@@ -1771,6 +1802,15 @@
             "items": {
               "type": "string"
             }
+          },
+          "sample_image_asset_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "title": "Sample Image Asset Ids",
+            "default": [],
+            "description": "风格样例图素材ID列表（支持多张）"
           }
         }
       },
@@ -1840,6 +1880,22 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "sample_image_preview_urls": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Image Preview Urls",
+            "description": "风格样例图预览URL列表（支持多张）"
           }
         }
       },

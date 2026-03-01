@@ -1,14 +1,21 @@
 import { MessageCircle, MoreVertical } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import * as api from '../api';
+
+type SessionDropdownState = {
+  sessionId: string;
+  top: number;
+  left: number;
+};
 
 export default function SessionPanel() {
   const { sessionList, activeSessionId, setActiveSessionId, fetchSessions, createSession, renameSession, removeSession, addToast } = useAppStore();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('未命名会话');
 
-  const [dropdownOpen, setDropdownOpen] = useState<string | null>(null);
+  const [dropdownState, setDropdownState] = useState<SessionDropdownState | null>(null);
   const [renameSessionObj, setRenameSessionObj] = useState<api.Session | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
   const [deleteSessionObj, setDeleteSessionObj] = useState<api.Session | null>(null);
@@ -42,27 +49,34 @@ export default function SessionPanel() {
   }, []);
 
   useEffect(() => {
-    if (!dropdownOpen) return;
+    if (!dropdownState) return;
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (!target) return;
       if (target.closest('[data-session-dropdown-root="true"]')) {
         return;
       }
-      setDropdownOpen(null);
+      setDropdownState(null);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setDropdownOpen(null);
+        setDropdownState(null);
       }
+    };
+    const handleLayoutChanged = () => {
+      setDropdownState(null);
     };
     document.addEventListener('mousedown', handlePointerDown);
     document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', handleLayoutChanged);
+    window.addEventListener('scroll', handleLayoutChanged, true);
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', handleLayoutChanged);
+      window.removeEventListener('scroll', handleLayoutChanged, true);
     };
-  }, [dropdownOpen]);
+  }, [dropdownState]);
 
   const handleCreateConfirm = () => {
     if (newTitle.trim()) {
@@ -89,7 +103,7 @@ export default function SessionPanel() {
             key={s.id}
             className={`session-item ${activeSessionId === s.id ? 'active' : ''}`}
             onClick={() => {
-              setDropdownOpen(null);
+              setDropdownState(null);
               setActiveSessionId(s.id);
             }}
           >
@@ -99,15 +113,26 @@ export default function SessionPanel() {
               <div style={{ fontSize: '0.75rem', opacity: 0.6, marginTop: '2px' }}>{new Date(s.created_at).toLocaleDateString()}</div>
             </div>
             <div style={{ position: 'relative' }} data-session-dropdown-root="true">
-              <button className="btn btn-icon" style={{ padding: '4px' }} onClick={(e) => { e.stopPropagation(); setDropdownOpen(s.id === dropdownOpen ? null : s.id); }}>
+              <button
+                className="btn btn-icon"
+                style={{ padding: '4px' }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const isCurrentOpen = dropdownState?.sessionId === s.id;
+                  if (isCurrentOpen) {
+                    setDropdownState(null);
+                    return;
+                  }
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setDropdownState({
+                    sessionId: s.id,
+                    top: rect.bottom + 6,
+                    left: rect.right - 124,
+                  });
+                }}
+              >
                 <MoreVertical size={16} />
               </button>
-              {dropdownOpen === s.id && (
-                <div style={{ position: 'absolute', right: 0, top: '100%', background: 'var(--panel-bg)', border: '1px solid var(--border-color)', borderRadius: '4px', zIndex: 10, padding: '4px', display: 'flex', flexDirection: 'column', minWidth: '100px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}>
-                  <button className="btn btn-ghost" style={{ textAlign: 'left', padding: '6px 12px', fontSize: '0.85rem' }} onClick={(e) => { e.stopPropagation(); setDropdownOpen(null); openRename(s); }}>重命名</button>
-                  <button className="btn btn-ghost" style={{ textAlign: 'left', padding: '6px 12px', fontSize: '0.85rem', color: 'var(--error)' }} onClick={(e) => { e.stopPropagation(); setDropdownOpen(null); openDelete(s); }}>删除</button>
-                </div>
-              )}
             </div>
           </div>
         ))}
@@ -181,6 +206,52 @@ export default function SessionPanel() {
             </div>
           </div>
         </div>
+      )}
+
+      {dropdownState && createPortal(
+        <div
+          data-session-dropdown-root="true"
+          style={{
+            position: 'fixed',
+            top: `${dropdownState.top}px`,
+            left: `${dropdownState.left}px`,
+            background: 'var(--bg-secondary)',
+            border: '1px solid var(--border-color)',
+            borderRadius: '8px',
+            zIndex: 3000,
+            padding: '4px',
+            display: 'flex',
+            flexDirection: 'column',
+            minWidth: '124px',
+            boxShadow: '0 10px 16px rgba(0,0,0,0.35)',
+          }}
+        >
+          <button
+            className="btn btn-ghost"
+            style={{ textAlign: 'left', padding: '6px 12px', fontSize: '0.85rem' }}
+            onClick={(e) => {
+              e.stopPropagation();
+              const target = sessionList.find((item) => item.id === dropdownState.sessionId);
+              setDropdownState(null);
+              if (target) openRename(target);
+            }}
+          >
+            重命名
+          </button>
+          <button
+            className="btn btn-ghost"
+            style={{ textAlign: 'left', padding: '6px 12px', fontSize: '0.85rem', color: 'var(--error)' }}
+            onClick={(e) => {
+              e.stopPropagation();
+              const target = sessionList.find((item) => item.id === dropdownState.sessionId);
+              setDropdownState(null);
+              if (target) openDelete(target);
+            }}
+          >
+            删除
+          </button>
+        </div>,
+        document.body
       )}
     </div>
   );

@@ -23,7 +23,7 @@ function splitImagePrompts(stylePrompt: string, expectedCount?: number): string[
   const normalized = stylePrompt.replace(/\r\n/g, '\n').trim();
   if (!normalized) return [];
 
-  const numberedMatches = normalized.match(/第[一二三四五六七八九十0-9]+张[：:][\s\S]*?(?=第[一二三四五六七八九十0-9]+张[：:]|$)/g);
+  const numberedMatches = normalized.match(/第[一二三四五六七八九十0-9]+张(?:（[^）]*）)?[：:][\s\S]*?(?=第[一二三四五六七八九十0-9]+张(?:（[^）]*）)?[：:]|$)/g);
   if (numberedMatches && numberedMatches.length > 0) {
     return numberedMatches.map((item) => item.trim());
   }
@@ -38,17 +38,21 @@ function splitImagePrompts(stylePrompt: string, expectedCount?: number): string[
     .map((item) => item.trim())
     .filter(Boolean);
   if (paragraphItems.length > 1) {
-    return paragraphItems;
+    const segmentedParagraphCount = paragraphItems.filter((item) => item.startsWith('生成一张') || /^第[一二三四五六七八九十0-9]+张(?:（[^）]*）)?[：:]/.test(item)).length;
+    if (segmentedParagraphCount === paragraphItems.length) {
+      return paragraphItems;
+    }
+    if ((expectedCount || 0) > 1 && paragraphItems.length === expectedCount && segmentedParagraphCount >= Math.max(1, (expectedCount || 1) - 1)) {
+      return paragraphItems;
+    }
   }
 
-  if ((expectedCount || 0) > 1 && normalized.includes('\n')) {
-    const lineItems = normalized
-      .split('\n')
-      .map((item) => item.trim())
-      .filter(Boolean);
-    if (lineItems.length >= (expectedCount || 0)) {
-      return lineItems;
-    }
+  if ((expectedCount || 0) === 1) {
+    return [normalized];
+  }
+
+  if (paragraphItems.length > 1 && paragraphItems.length <= 2) {
+    return paragraphItems;
   }
 
   return [normalized];
@@ -68,6 +72,7 @@ export default function GeneratePanel() {
   const isRunning = latestJob?.status === 'running' || latestJob?.status === 'queued';
   const status = latestJob?.status || 'idle';
   const progressPercent = latestJob?.progress_percent || 0;
+  const currentJobStage = latestJob?.current_stage ? normalizeStageName(latestJob.current_stage) : null;
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
@@ -204,15 +209,13 @@ export default function GeneratePanel() {
                 const isCurrent = stage.stage === currentStageName;
                 const hasHistory = group.history.length > 0;
                 
-                // Use implicit success if an older stage is stuck but subsequent stages have started
-                const isImplicitSuccess =
+                const isTerminalFailedCurrent =
+                  (status === 'failed' || status === 'canceled') &&
+                  currentJobStage === stage.stage &&
                   stage.status !== 'success' &&
-                  stage.status !== 'failed' &&
-                  stage.status !== 'partial_success' &&
-                  stage.status !== 'canceled' &&
-                  i < groupedStages.length - 1;
-                const isSuccessIcon = stage.status === 'success' || stage.status === 'partial_success' || isImplicitSuccess;
-                const isFailedIcon = stage.status === 'failed' || stage.status === 'canceled';
+                  stage.status !== 'partial_success';
+                const isSuccessIcon = stage.status === 'success' || stage.status === 'partial_success';
+                const isFailedIcon = stage.status === 'failed' || stage.status === 'canceled' || isTerminalFailedCurrent;
 
                 const iconColor = isSuccessIcon ? 'var(--success)' : isFailedIcon ? 'var(--error)' : 'var(--accent-color)';
                 const iconElement = isSuccessIcon ? '✓' : isFailedIcon ? '✗' : <Loader2 size={14} className="animate-spin" />;

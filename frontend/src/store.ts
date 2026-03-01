@@ -125,9 +125,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (id) {
       try {
         const detail = await api.getSessionDetail(id);
+        if (get().activeSessionId !== id) return;
         if (detail.jobs && detail.jobs.length > 0) {
           // Find the most recent job
           const lastJob = detail.jobs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+          if (get().activeSessionId !== id) return;
           set({ latestJob: lastJob });
           get().fetchStages();
           get().fetchAssetBreakdown();
@@ -231,11 +233,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   pollJobStatus: async () => {
-    const { latestJob } = get();
+    const { latestJob, activeSessionId } = get();
     if (!latestJob?.id) return;
+    const pollingJobId = latestJob.id;
+    const pollingSessionId = latestJob.session_id;
+    if (activeSessionId && pollingSessionId && activeSessionId !== pollingSessionId) return;
 
     try {
-      const job = await api.getGenerationJob(latestJob.id);
+      const job = await api.getGenerationJob(pollingJobId);
+      const current = get();
+      if (current.activeSessionId !== pollingSessionId) return;
+      if (current.latestJob?.id !== pollingJobId) return;
       set({ latestJob: job });
 
       get().fetchStages();

@@ -27,13 +27,14 @@ ASSET_EXTRACT_SYSTEM_PROMPT = (
     "你是资产提取助手。请从输入中提取本次创作资产，输出严格 JSON："
     '{"locations":[""],"scenes":[""],"foods":[""],"keywords":[""],"confidence":0.0}。'
     "要求："
-    "1) locations 只放地点（城市/区域）；"
+    "1) locations 只放地点（城市/区域/地理带），例如西安、陕西、河西走廊；"
     "2) scenes 只放景点地标；"
     "3) foods 只放食物饮品；"
     "4) keywords 仅保留与地点/景点/食物强相关词；"
     "5) 去重并过滤空值；"
     "6) 不要输出风格词和画法词；"
-    "7) 只输出 JSON，不要 Markdown，不要解释。"
+    "7) 像“街边老店、夜市摊位、餐馆内景”这种不属于地点，必须放到 scenes 或 keywords，不得放入 locations；"
+    "8) 只输出 JSON，不要 Markdown，不要解释。"
 )
 PROMPT_PLAN_SYSTEM_PROMPT = (
     "你是生图提示词规划助手。请根据风格、资产和目标张数输出严格 JSON："
@@ -42,12 +43,13 @@ PROMPT_PLAN_SYSTEM_PROMPT = (
     "1) items 数量必须等于目标张数；"
     "2) 每个 prompt_text 只能描述一张图，禁止拼贴和多画面合成；"
     "3) 各图主体与叙事重点要有差异，但风格、色彩与质感必须统一；"
-    "4) 每条 prompt_text 必须包含主体、场景、构图、镜头、光线、氛围与细节约束；"
-    "5) asset_refs 只允许填写输入素材中的 asset_id，且至少 1 个；"
-    "6) 只输出 JSON，不要 Markdown，不要解释。"
+    "4) 每条 prompt_text 必须是“旅游攻略图解/手账信息图”，不是纯作画插图；"
+    "5) 每条 prompt_text 必须包含主体、场景、构图、镜头、光线、氛围与细节约束；"
+    "6) 每个景点/美食都要写明“名称+10-20字简短介绍”的标注要求，且禁止出现“（15字）/15字/字数说明”等字样；"
+    "7) asset_refs 只允许填写输入素材中的 asset_id，且至少 1 个；"
+    "8) 只输出 JSON，不要 Markdown，不要解释。"
 )
 logger = logging.getLogger(__name__)
-
 
 class GenerationWorker(GenerationPipelineMixin):
     def __init__(
@@ -399,18 +401,13 @@ class GenerationWorker(GenerationPipelineMixin):
             ) from error
 
         locations = self._normalize_asset_values(payload.get("locations"))
-        scenes = self._merge_unique_values(self._normalize_asset_values(payload.get("scenes")), locations)
+        scenes = self._normalize_asset_values(payload.get("scenes"))
         foods = self._normalize_asset_values(payload.get("foods"))
-        keywords = self._merge_unique_values(
-            self._normalize_asset_values(payload.get("keywords")),
-            locations + scenes + foods,
-        )
+        keywords = self._normalize_asset_values(payload.get("keywords"))
         if not foods and content_mode in {"food", "food_scenic"}:
             raise DomainError(code="E-1004", message="资产提取失败：缺少可用食物信息，请补充需求后重试", status_code=400)
         if not scenes and content_mode in {"scenic", "food_scenic"}:
             raise DomainError(code="E-1004", message="资产提取失败：缺少可用景点信息，请补充需求后重试", status_code=400)
-        if not keywords:
-            keywords = self._merge_unique_values([], foods + scenes)
         return {
             "foods": foods[:10],
             "scenes": scenes[:10],
@@ -577,7 +574,10 @@ class GenerationWorker(GenerationPipelineMixin):
         return (
             f"{focus_title}：{focus_description}\n"
             f"地点：{locations}；景点：{scenes}；美食：{foods}；关键词：{keywords}。\n"
-            "强约束：只能围绕本条列出的地点/景点/美食展开，禁止引入未确认的实体。"
+            "强约束：只能围绕本条列出的地点/景点/美食展开，禁止引入未确认的实体。\n"
+            "画面必须是旅游攻略图解/手账信息图，禁止做成纯风景或纯食物插画。\n"
+            "每个景点或美食旁边都要放“名称+10-20字简短介绍”标签，并用箭头或编号连接，且禁止出现“（15字）/15字/字数说明”等字样。\n"
+            "构图约束：画面内容必须铺满整张画布，禁止外圈留白、相纸边、画框边、底板边。"
         )
 
     def _build_prompt_plan_user_prompt(
@@ -667,10 +667,25 @@ class GenerationWorker(GenerationPipelineMixin):
         normalized = prompt_text.strip()
         if "请只生成一张图片" not in normalized:
             normalized = f"请只生成一张图片。\n{normalized}"
+        if "图解" not in normalized and "信息图" not in normalized:
+            normalized = (
+                f"{normalized}\n"
+                "版式约束：输出旅游攻略图解/手账信息图，包含标题区、图标/贴纸、导览箭头和信息标签。"
+            )
+        if "10-20字简短介绍" not in normalized:
+            normalized = (
+                f"{normalized}\n"
+                "标注约束：每个景点/美食都必须配“名称+10-20字简短介绍”的中文标签，且标签正文禁止出现“（15字）/15字/字数说明”。"
+            )
         if "禁止拼贴" not in normalized:
             normalized = (
                 f"{normalized}\n"
                 "强约束：禁止拼贴、禁止九宫格、禁止分镜、禁止多画面合成、禁止任何文字水印。"
+            )
+        if "禁止外圈留白" not in normalized and "禁止留白边框" not in normalized:
+            normalized = (
+                f"{normalized}\n"
+                "构图约束：画面需铺满画布，禁止外圈留白、白边、相纸边、画框边与背景底板边。"
             )
         if "仅借鉴风格" not in normalized:
             normalized = (
@@ -760,7 +775,8 @@ class GenerationWorker(GenerationPipelineMixin):
                         last_error_message = error.message
                     elif previous_is_network_error == current_is_network_error:
                         last_error_message = error.message
-                if attempt <= max_retry_per_slot:
+                should_retry = self._is_retryable_image_failure(error)
+                if should_retry and attempt <= max_retry_per_slot:
                     pending_slots.append(slot)
                 else:
                     failed_slots.add(slot)
@@ -788,6 +804,27 @@ class GenerationWorker(GenerationPipelineMixin):
 
         ordered_results = [results_by_slot[slot] for slot in sorted(results_by_slot.keys())]
         return ordered_results, len(failed_slots), last_error_message
+
+    def _is_retryable_image_failure(self, error: DomainError) -> bool:
+        message = str(error.message or "").lower()
+        non_retryable_markers = (
+            "预扣费",
+            "额度",
+            "余额",
+            "insufficient",
+            "quota",
+            "credit",
+            "billing",
+            "payment required",
+            "api key",
+            "unauthorized",
+            "forbidden",
+            "模型不存在",
+            "model not found",
+            "invalid model",
+            "permission",
+        )
+        return not any(marker in message for marker in non_retryable_markers)
 
     def _resolve_image_model_provider(self) -> tuple[dict[str, Any], str, list[str]]:
         routing = self.model_service.require_routing()
@@ -858,41 +895,14 @@ class GenerationWorker(GenerationPipelineMixin):
         reference_image_paths: list[str] | None = None,
     ) -> tuple[bytes, str]:
         endpoint = f"{image_provider['base_url'].rstrip('/')}/images/generations"
-        payload = self._build_image_generation_payload(
+        response_payload = self._request_image_generation_payload(
+            provider_id=provider_id,
             model_name=model_name,
+            endpoint=endpoint,
+            api_key=image_provider["api_key"],
             prompt=prompt,
             reference_image_paths=reference_image_paths,
         )
-        try:
-            response_payload = self._post_json(
-                provider_id=provider_id,
-                model_name=model_name,
-                url=endpoint,
-                api_key=image_provider["api_key"],
-                payload=payload,
-            )
-        except DomainError as error:
-            if reference_image_paths and self._should_retry_without_references(error):
-                logger.warning(
-                    "生图参考图参数不兼容，自动回退 prompt-only: provider_id=%s model_name=%s reason=%s",
-                    provider_id,
-                    model_name,
-                    error.message,
-                )
-                fallback_payload = self._build_image_generation_payload(
-                    model_name=model_name,
-                    prompt=prompt,
-                    reference_image_paths=None,
-                )
-                response_payload = self._post_json(
-                    provider_id=provider_id,
-                    model_name=model_name,
-                    url=endpoint,
-                    api_key=image_provider["api_key"],
-                    payload=fallback_payload,
-                )
-            else:
-                raise
         image_item = self._extract_primary_image_item(response_payload)
 
         b64_candidates = [
@@ -905,7 +915,7 @@ class GenerationWorker(GenerationPipelineMixin):
         for candidate in b64_candidates:
             decoded = self._decode_base64_image(candidate)
             if decoded:
-                return decoded
+                return self._postprocess_generated_image(decoded[0], decoded[1])
 
         url_candidates = [
             image_item.get("url"),
@@ -920,7 +930,7 @@ class GenerationWorker(GenerationPipelineMixin):
             data_url_decoded = self._decode_base64_image(image_url)
             if image_url.startswith("data:image/"):
                 if data_url_decoded:
-                    return data_url_decoded
+                    return self._postprocess_generated_image(data_url_decoded[0], data_url_decoded[1])
                 raise DomainError(code="E-1004", message="上游返回非图片内容", status_code=400)
             image_bytes = self._download_binary(
                 provider_id=provider_id,
@@ -929,7 +939,7 @@ class GenerationWorker(GenerationPipelineMixin):
             )
             extension = self._detect_image_extension(image_bytes) or self._infer_extension_from_url(image_url)
             if extension:
-                return image_bytes, extension
+                return self._postprocess_generated_image(image_bytes, extension)
             raise DomainError(code="E-1004", message="上游返回非图片内容", status_code=400)
 
         has_image_like_data = any(isinstance(candidate, str) and candidate.strip() for candidate in b64_candidates)

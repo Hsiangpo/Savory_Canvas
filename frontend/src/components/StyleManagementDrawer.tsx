@@ -15,6 +15,11 @@ interface LocalSampleImage {
   preview_url: string;
 }
 
+interface ExistingSampleImage {
+  asset_id: string;
+  preview_url: string;
+}
+
 function normalizeSearchText(style: StyleProfile): string {
   const payload = style.style_payload || ({} as StylePayload);
   const keywords = Array.isArray(payload.extra_keywords) ? payload.extra_keywords.join(' ') : '';
@@ -44,9 +49,8 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
   const [isFormVisible, setIsFormVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [searchText, setSearchText] = useState('');
-  const [selectedSampleImageAssetId, setSelectedSampleImageAssetId] = useState('');
+  const [existingSampleImages, setExistingSampleImages] = useState<ExistingSampleImage[]>([]);
   const [draftSampleImages, setDraftSampleImages] = useState<LocalSampleImage[]>([]);
-  const [selectedDraftSampleId, setSelectedDraftSampleId] = useState('');
   const [formRenderKey, setFormRenderKey] = useState(0);
   const [isSampleDragActive, setIsSampleDragActive] = useState(false);
   const [styleToDelete, setStyleToDelete] = useState<string | null>(null);
@@ -78,23 +82,34 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
     return { globalStyles, sessionStyles, otherStyles };
   }, [activeSessionId, filteredStyles]);
 
-  const selectedDraftSample = useMemo(
-    () => draftSampleImages.find((item) => item.id === selectedDraftSampleId) ?? null,
-    [draftSampleImages, selectedDraftSampleId],
-  );
-
   const clearDraftSampleImages = useCallback(() => {
     setDraftSampleImages((current) => {
       current.forEach((item) => URL.revokeObjectURL(item.preview_url));
       return [];
     });
-    setSelectedDraftSampleId('');
   }, []);
 
   const handleEdit = (style: StyleProfile) => {
     clearDraftSampleImages();
     setEditingStyle(style);
-    setSelectedSampleImageAssetId(style.style_payload?.sample_image_asset_id || '');
+    const payloadIds = Array.isArray(style.style_payload?.sample_image_asset_ids)
+      ? style.style_payload.sample_image_asset_ids
+      : (style.style_payload?.sample_image_asset_id ? [style.style_payload.sample_image_asset_id] : []);
+    const payloadUrls = Array.isArray(style.sample_image_preview_urls)
+      ? style.sample_image_preview_urls
+      : (style.sample_image_preview_url ? [style.sample_image_preview_url] : []);
+    const merged: ExistingSampleImage[] = [];
+    const maxLength = Math.max(payloadIds.length, payloadUrls.length);
+    for (let index = 0; index < maxLength; index += 1) {
+      const assetId = payloadIds[index];
+      const previewUrl = payloadUrls[index];
+      if (!assetId && !previewUrl) continue;
+      merged.push({
+        asset_id: assetId || `existing-${index + 1}`,
+        preview_url: previewUrl || '',
+      });
+    }
+    setExistingSampleImages(merged);
     setIsFormVisible(true);
     setFormRenderKey((value) => value + 1);
   };
@@ -102,7 +117,7 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
   const handleAddNew = () => {
     clearDraftSampleImages();
     setEditingStyle(null);
-    setSelectedSampleImageAssetId('');
+    setExistingSampleImages([]);
     setIsFormVisible(true);
     setFormRenderKey((value) => value + 1);
   };
@@ -128,33 +143,34 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
     const colorMood = (form.elements.namedItem('color_mood') as HTMLInputElement).value.trim();
     const promptExample = (form.elements.namedItem('prompt_example') as HTMLTextAreaElement).value.trim();
     const extraKeywordsRaw = (form.elements.namedItem('extra_keywords') as HTMLInputElement).value;
-    let sampleImageAssetId = selectedSampleImageAssetId || undefined;
-    if (selectedDraftSampleId) {
-      const selectedDraft = draftSampleImages.find((item) => item.id === selectedDraftSampleId);
-      if (!selectedDraft) {
-        addToast('请选择有效样例图后再保存。', 'error');
-        return;
-      }
+    const sampleImageAssetIds = existingSampleImages
+      .map((item) => item.asset_id)
+      .filter((assetId) => assetId && !assetId.startsWith('existing-'));
+    if (draftSampleImages.length > 0) {
       if (!activeSessionId) {
         addToast('请先选中一个会话，再保存带样例图的风格。', 'error');
         return;
       }
       setLoading(true);
       try {
-        const createdAsset = await api.uploadImageAsset(activeSessionId, selectedDraft.file);
-        sampleImageAssetId = createdAsset.id;
+        for (const draftImage of draftSampleImages) {
+          const createdAsset = await api.uploadImageAsset(activeSessionId, draftImage.file);
+          sampleImageAssetIds.push(createdAsset.id);
+        }
       } catch {
         setLoading(false);
         addToast('样例图上传失败，请稍后重试。', 'error');
         return;
       }
     }
+    const normalizedSampleImageAssetIds = Array.from(new Set(sampleImageAssetIds));
     const stylePayload: StylePayload = {
       painting_style: paintingStyle,
       color_mood: colorMood,
       style_prompt: promptExample,
       prompt_example: promptExample,
-      sample_image_asset_id: sampleImageAssetId,
+      sample_image_asset_id: normalizedSampleImageAssetIds[0] || undefined,
+      sample_image_asset_ids: normalizedSampleImageAssetIds,
       extra_keywords: extraKeywordsRaw
         .split(/[，,]/)
         .map((item) => item.trim())
@@ -170,7 +186,7 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
     setIsFormVisible(false);
     setEditingStyle(null);
     clearDraftSampleImages();
-    setSelectedSampleImageAssetId('');
+    setExistingSampleImages([]);
   };
 
   const handleUploadSampleImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -192,10 +208,6 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
       preview_url: URL.createObjectURL(file),
     }));
     setDraftSampleImages((current) => [...current, ...localImages]);
-    if (!selectedDraftSampleId) {
-      setSelectedDraftSampleId(localImages[0].id);
-    }
-    setSelectedSampleImageAssetId('');
     addToast('样例图已加入草稿，点击保存后才会入库。', 'success');
   };
 
@@ -227,12 +239,12 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
     setDraftSampleImages((current) => {
       const target = current.find((item) => item.id === draftId);
       if (target) URL.revokeObjectURL(target.preview_url);
-      const next = current.filter((item) => item.id !== draftId);
-      if (selectedDraftSampleId === draftId) {
-        setSelectedDraftSampleId(next[0]?.id || '');
-      }
-      return next;
+      return current.filter((item) => item.id !== draftId);
     });
+  };
+
+  const handleRemoveExistingSample = (assetId: string) => {
+    setExistingSampleImages((current) => current.filter((item) => item.asset_id !== assetId));
   };
 
   const renderStyleCard = (style: StyleProfile) => (
@@ -265,13 +277,27 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
         <div><strong>色彩情绪：</strong>{style.style_payload.color_mood || '-'}</div>
         <div><strong>风格细节关键词：</strong>{(style.style_payload.extra_keywords || []).length > 0 ? style.style_payload.extra_keywords.join('、') : '无'}</div>
       </div>
-      {style.sample_image_preview_url && (
-        <div style={{ marginTop: '10px' }}>
-          <img
-            src={style.sample_image_preview_url}
-            alt="风格样例图"
-            style={{ width: '100%', maxHeight: '120px', objectFit: 'cover', borderRadius: '6px', border: '1px solid var(--border-color)' }}
-          />
+      {(style.sample_image_preview_urls?.length || style.sample_image_preview_url) && (
+        <div style={{ marginTop: '10px', display: 'grid', gap: '8px' }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(84px, 1fr))',
+              gap: '8px',
+            }}
+          >
+            {(style.sample_image_preview_urls?.length ? style.sample_image_preview_urls : [style.sample_image_preview_url]).map((previewUrl, index) => (
+              <img
+                key={`${style.id}-${index}`}
+                src={previewUrl}
+                alt={`风格样例图 ${index + 1}`}
+                style={{ width: '100%', height: '84px', objectFit: 'cover', borderRadius: '6px', border: '1px solid var(--border-color)' }}
+              />
+            ))}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            共 {(style.sample_image_preview_urls?.length || 1)} 张样例图
+          </div>
         </div>
       )}
     </div>
@@ -347,24 +373,96 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
               </button>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {existingSampleImages.length > 0 && (
+                <div style={{ display: 'grid', gap: '8px' }}>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>已保存样例图（保存时可删除）</div>
+                  <div
+                    style={{
+                      maxHeight: '220px',
+                      overflowY: 'auto',
+                      display: 'grid',
+                      gap: '8px',
+                      paddingRight: '4px',
+                    }}
+                  >
+                    {existingSampleImages.map((item, index) => (
+                      <div
+                        key={`${item.asset_id}-${index}`}
+                        style={{
+                          border: '1px solid var(--border-color)',
+                          background: 'var(--bg-glass)',
+                          borderRadius: '8px',
+                          padding: '8px',
+                          display: 'grid',
+                          gridTemplateColumns: '60px 1fr auto',
+                          gap: '10px',
+                          alignItems: 'center',
+                        }}
+                      >
+                        {item.preview_url ? (
+                          <img
+                            src={item.preview_url}
+                            alt={`已保存样例图 ${index + 1}`}
+                            style={{
+                              width: '60px',
+                              height: '60px',
+                              borderRadius: '6px',
+                              objectFit: 'cover',
+                              border: '1px solid var(--border-color)',
+                            }}
+                          />
+                        ) : (
+                          <div
+                            style={{
+                              width: '60px',
+                              height: '60px',
+                              borderRadius: '6px',
+                              border: '1px dashed var(--border-color)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: '0.68rem',
+                              color: 'var(--text-muted)',
+                            }}
+                          >
+                            无预览
+                          </div>
+                        )}
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: '0.84rem', color: 'var(--text-primary)' }}>样例图 {index + 1}</div>
+                          <div style={{ marginTop: '4px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>已保存到风格配置</div>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => handleRemoveExistingSample(item.asset_id)}
+                          style={{ padding: '6px' }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {draftSampleImages.length > 0 && (
-                <div
-                  style={{
-                    maxHeight: '220px',
-                    overflowY: 'auto',
-                    display: 'grid',
-                    gap: '8px',
-                    paddingRight: '4px',
-                  }}
-                >
-                  {draftSampleImages.map((item, index) => {
-                    const selected = item.id === selectedDraftSampleId;
-                    return (
+                <div style={{ display: 'grid', gap: '8px' }}>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>本次新增草稿图（保存时上传）</div>
+                  <div
+                    style={{
+                      maxHeight: '220px',
+                      overflowY: 'auto',
+                      display: 'grid',
+                      gap: '8px',
+                      paddingRight: '4px',
+                    }}
+                  >
+                    {draftSampleImages.map((item, index) => (
                       <div
                         key={item.id}
                         style={{
-                          border: `1px solid ${selected ? 'var(--accent-warning)' : 'var(--border-color)'}`,
-                          background: selected ? 'rgba(255, 122, 89, 0.12)' : 'var(--bg-glass)',
+                          border: '1px solid var(--border-color)',
+                          background: 'var(--bg-glass)',
                           borderRadius: '8px',
                           padding: '8px',
                           display: 'grid',
@@ -375,7 +473,7 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
                       >
                         <img
                           src={item.preview_url}
-                          alt={`样例图 ${index + 1}`}
+                          alt={`草稿样例图 ${index + 1}`}
                           style={{
                             width: '60px',
                             height: '60px',
@@ -384,26 +482,14 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
                             border: '1px solid var(--border-color)',
                           }}
                         />
-                        <button
-                          type="button"
-                          onClick={() => setSelectedDraftSampleId(item.id)}
-                          style={{
-                            textAlign: 'left',
-                            background: 'transparent',
-                            border: 'none',
-                            color: 'var(--text-primary)',
-                            cursor: 'pointer',
-                            minWidth: 0,
-                          }}
-                          title={item.file.name}
-                        >
-                          <div style={{ fontSize: '0.84rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        <div title={item.file.name} style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: '0.84rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--text-primary)' }}>
                             {formatFileDisplayName(item.file, index)}
                           </div>
                           <div style={{ marginTop: '4px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                             本地草稿（保存时上传）
                           </div>
-                        </button>
+                        </div>
                         <button
                           type="button"
                           className="btn btn-secondary"
@@ -413,71 +499,30 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
                           <Trash2 size={14} />
                         </button>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-              {selectedDraftSample && (
-                <div
-                  style={{
-                    border: '1px solid var(--border-color)',
-                    borderRadius: '8px',
-                    padding: '8px',
-                    background: 'var(--bg-glass)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px',
-                  }}
-                >
-                  <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>当前绑定样例图（保存后生效）</div>
-                  <img
-                    src={selectedDraftSample.preview_url}
-                    alt="当前样例图预览"
-                    style={{ width: '100%', maxHeight: '140px', objectFit: 'cover', borderRadius: '6px', border: '1px solid var(--border-color)' }}
-                  />
-                  <div style={{ fontSize: '0.8rem', color: 'var(--text-primary)' }}>{selectedDraftSample.file.name}</div>
-                </div>
-              )}
-              {!selectedDraftSample && editingStyle?.sample_image_preview_url && (
-                <div
-                  style={{
-                    border: '1px solid var(--border-color)',
-                    borderRadius: '8px',
-                    padding: '8px',
-                    background: 'var(--bg-glass)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px',
-                  }}
-                >
-                  <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>当前绑定样例图（已保存，可替换）</div>
-                  <img
-                    src={editingStyle.sample_image_preview_url}
-                    alt="当前样例图预览"
-                    style={{ width: '100%', maxHeight: '140px', objectFit: 'cover', borderRadius: '6px', border: '1px solid var(--border-color)' }}
-                  />
-                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      style={{ padding: '6px 10px', color: 'var(--error)' }}
-                      onClick={() => {
-                        setSelectedSampleImageAssetId('');
-                        addToast('已移除当前样例图，保存后生效。', 'info');
-                      }}
-                    >
-                      <Trash2 size={14} /> 删除当前样例图
-                    </button>
+                    ))}
                   </div>
                 </div>
               )}
-              {!selectedDraftSample && !editingStyle?.sample_image_preview_url && (
+              {existingSampleImages.length === 0 && draftSampleImages.length === 0 && (
                 <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>未上传样例图，保存后将以纯文本风格参数生成。</div>
               )}
             </div>
             <div style={{ display: 'flex', gap: '10px' }}>
               <button type="submit" className="btn btn-primary" disabled={loading} style={{ flex: 1 }}>保存</button>
-              <button type="button" className="btn btn-secondary" disabled={loading} style={{ flex: 1 }} onClick={() => setIsFormVisible(false)}>取消</button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={loading}
+                style={{ flex: 1 }}
+                onClick={() => {
+                  setIsFormVisible(false);
+                  setEditingStyle(null);
+                  setExistingSampleImages([]);
+                  clearDraftSampleImages();
+                }}
+              >
+                取消
+              </button>
             </div>
           </form>
         ) : (

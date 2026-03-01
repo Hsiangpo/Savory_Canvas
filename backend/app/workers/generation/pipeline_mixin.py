@@ -10,6 +10,9 @@ from urllib import request
 
 from backend.app.core.errors import DomainError
 from backend.app.core.utils import new_id, now_iso
+from backend.app.workers.generation.image_request_mixin import ImageRequestMixin
+from backend.app.workers.generation.image_postprocess import postprocess_generated_image
+from backend.app.workers.generation.text_model_retry import build_text_model_name_candidates, should_retry_text_model_name
 
 NON_VISUAL_STYLE_KEYS = {"image_count", "style_prompt", "force_partial_fail", "draft_style_id", "allocation_plan"}
 logger = logging.getLogger(__name__)
@@ -22,18 +25,20 @@ class CopyModelError(Exception):
         self.detail = detail or reason
 
 
-class GenerationPipelineMixin:
+class GenerationPipelineMixin(ImageRequestMixin):
     def _build_image_generation_payload(
         self,
         *,
         model_name: str,
         prompt: str,
         reference_image_paths: list[str] | None,
+        size: str | None = None,
     ) -> dict[str, Any]:
+        resolved_size = size or self._resolve_initial_image_size(model_name)
         payload: dict[str, Any] = {
             "model": model_name,
             "prompt": prompt,
-            "size": "1024x1024",
+            "size": resolved_size,
             "n": 1,
             "response_format": "b64_json",
         }
@@ -115,15 +120,30 @@ class GenerationPipelineMixin:
         references: list[str] = []
         source_assets_by_id = {asset.get("id"): asset for asset in source_assets if isinstance(asset.get("id"), str)}
         tagged_reference_asset_ids = self._collect_tagged_reference_asset_ids(session_id)
-        sample_asset_id = style_payload.get("sample_image_asset_id")
-        if isinstance(sample_asset_id, str) and sample_asset_id.strip():
-            sample_asset = self.asset_repo.get(sample_asset_id.strip())
-            sample_path = sample_asset.get("file_path") if sample_asset else None
-            if isinstance(sample_path, str) and sample_path.strip():
-                references.append(sample_path.strip())
+        sample_asset_ids = style_payload.get("sample_image_asset_ids")
+        if isinstance(sample_asset_ids, list):
+            for sample_asset_id in sample_asset_ids:
+                if not isinstance(sample_asset_id, str) or not sample_asset_id.strip():
+                    continue
+                sample_asset = self.asset_repo.get(sample_asset_id.strip())
+                sample_path = sample_asset.get("file_path") if sample_asset else None
+                if isinstance(sample_path, str) and sample_path.strip():
+                    references.append(sample_path.strip())
+        else:
+            sample_asset_id = style_payload.get("sample_image_asset_id")
+            if isinstance(sample_asset_id, str) and sample_asset_id.strip():
+                sample_asset = self.asset_repo.get(sample_asset_id.strip())
+                sample_path = sample_asset.get("file_path") if sample_asset else None
+                if isinstance(sample_path, str) and sample_path.strip():
+                    references.append(sample_path.strip())
         sample_file_path = style_payload.get("sample_image_file_path")
         if isinstance(sample_file_path, str) and sample_file_path.strip():
             references.append(sample_file_path.strip())
+        sample_file_paths = style_payload.get("sample_image_file_paths")
+        if isinstance(sample_file_paths, list):
+            for sample_path in sample_file_paths:
+                if isinstance(sample_path, str) and sample_path.strip():
+                    references.append(sample_path.strip())
         for asset_id in tagged_reference_asset_ids:
             asset = source_assets_by_id.get(asset_id) or self.asset_repo.get(asset_id)
             if not asset or asset.get("asset_type") != "image":
@@ -244,10 +264,14 @@ class GenerationPipelineMixin:
             if upstream_error_message:
                 raise DomainError(
                     code="E-1004",
-                    message=f"图片生成失败：{upstream_error_message}",
+                    message=f"图片生成失败：{self._format_upstream_provider_error(upstream_error_message)}",
                     status_code=400,
                 ) from error
-            raise DomainError(code="E-1004", message=f"图片生成失败：HTTP {error.code}", status_code=400) from error
+            raise DomainError(
+                code="E-1004",
+                message=f"图片生成失败：{self._format_upstream_provider_error(f'HTTP {error.code}')}",
+                status_code=400,
+            ) from error
         except (url_error.URLError, TimeoutError, OSError) as error:
             self._log_upstream_failure(
                 provider_id=provider_id,
@@ -256,7 +280,13 @@ class GenerationPipelineMixin:
                 http_status=None,
                 reason=f"network_error:{type(error).__name__}",
             )
-            raise DomainError(code="E-1004", message="图片生成失败：网络异常", status_code=400) from error
+            normalized_error = self._normalize_upstream_error_text(str(error))
+            detail = normalized_error or type(error).__name__
+            raise DomainError(
+                code="E-1004",
+                message=f"图片生成失败：上游网络异常（上游：{detail}）",
+                status_code=400,
+            ) from error
 
         try:
             parsed = json.loads(raw_text)
@@ -268,7 +298,9 @@ class GenerationPipelineMixin:
                 http_status=200,
                 reason="invalid_json",
             )
-            raise DomainError(code="E-1004", message="图片生成失败：上游响应格式错误", status_code=400) from error
+            raw_preview = self._normalize_upstream_error_text(raw_text)
+            suffix = f"（上游：{raw_preview}）" if raw_preview else ""
+            raise DomainError(code="E-1004", message=f"图片生成失败：上游响应格式错误{suffix}", status_code=400) from error
         if not isinstance(parsed, dict):
             self._log_upstream_failure(
                 provider_id=provider_id,
@@ -289,7 +321,7 @@ class GenerationPipelineMixin:
             )
             raise DomainError(
                 code="E-1004",
-                message=f"图片生成失败：{upstream_error_message or '上游服务返回错误'}",
+                message=f"图片生成失败：{self._format_upstream_provider_error(upstream_error_message or '上游服务返回错误')}",
                 status_code=400,
             )
         return parsed
@@ -415,6 +447,43 @@ class GenerationPipelineMixin:
             return stripped[:120]
         return self._extract_upstream_error_message(parsed)
 
+    def _format_upstream_provider_error(self, raw_text: str) -> str:
+        normalized = self._normalize_upstream_error_text(raw_text)
+        lowered = normalized.lower()
+        if any(marker in lowered for marker in ("429", "rate limit", "too many requests", "限流")):
+            base = "上游服务触发限流，请稍后重试"
+        elif any(marker in lowered for marker in ("401", "unauthorized", "api key", "invalid key", "鉴权")):
+            base = "上游鉴权失败，请检查密钥配置"
+        elif any(marker in lowered for marker in ("403", "forbidden", "permission", "权限")):
+            base = "上游权限不足，请检查模型权限"
+        elif any(marker in lowered for marker in ("402", "payment", "insufficient", "quota", "credit", "额度", "余额", "预扣费")):
+            base = "上游额度不足，请充值后重试"
+        elif any(marker in lowered for marker in ("not implemented", "protocol", "unsupported", "不支持")):
+            base = "上游协议不兼容，请切换协议或模型"
+        elif any(marker in lowered for marker in ("timeout", "timed out", "network", "连接", "超时")):
+            base = "上游网络超时，请稍后重试"
+        elif any(marker in lowered for marker in ("model not found", "invalid model", "模型不存在")):
+            base = "上游模型不可用，请切换模型"
+        elif any(marker in lowered for marker in ("size", "pixels", "分辨率", "尺寸")):
+            base = "上游参数不符合要求，请调整后重试"
+        elif any(marker in lowered for marker in ("500", "502", "503", "504", "gateway", "upstream")):
+            base = "上游服务暂不可用，请稍后重试"
+        else:
+            base = "上游服务返回错误"
+        if normalized:
+            return f"{base}（上游：{normalized}）"
+        return base
+
+    def _normalize_upstream_error_text(self, raw_text: str, max_len: int = 220) -> str:
+        if not isinstance(raw_text, str):
+            return ""
+        normalized = " ".join(raw_text.strip().split())
+        if not normalized:
+            return ""
+        if len(normalized) > max_len:
+            return f"{normalized[:max_len]}..."
+        return normalized
+
     def _build_upstream_headers(self, api_key: str) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {api_key}",
@@ -433,8 +502,9 @@ class GenerationPipelineMixin:
 
     def _build_upstream_http_error_detail(self, *, status_code: int, body_text: str) -> str:
         if self._looks_like_html_error_page(body_text):
-            return f"HTTP {status_code}: 上游网关拒绝访问（返回 HTML 页面）"
-        return f"HTTP {status_code}: {body_text[:120]}"
+            return f"上游网关拒绝访问（HTTP {status_code}，返回 HTML 页面）"
+        normalized_raw = self._extract_error_message_from_raw_text(body_text) or f"HTTP {status_code}"
+        return f"{self._format_upstream_provider_error(normalized_raw)}（HTTP {status_code}）"
 
     def _download_binary(
         self,
@@ -511,6 +581,9 @@ class GenerationPipelineMixin:
         if content[4:12] == b"ftypavif":
             return "avif"
         return ""
+
+    def _postprocess_generated_image(self, image_bytes: bytes, extension: str) -> tuple[bytes, str]:
+        return postprocess_generated_image(image_bytes, extension)
 
     def _format_style_payload(self, style_payload: dict[str, Any]) -> str:
         if not style_payload:
@@ -660,57 +733,47 @@ class GenerationPipelineMixin:
         provider_id = str(provider.get("id") or "").strip()
         max_attempts = 3
         last_error: CopyModelError | None = None
+        model_candidates = build_text_model_name_candidates(model_name)
 
-        for attempt in range(1, max_attempts + 1):
-            protocol_order = self._build_text_protocol_order(provider_id, provider.get("api_protocol"))
-            for index, protocol in enumerate(protocol_order):
-                endpoint, payload = self._build_text_protocol_payload(
-                    provider=provider,
-                    model_name=model_name,
-                    protocol=protocol,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                )
-                try:
-                    response_payload = self._post_text_json(
-                        endpoint=endpoint,
-                        api_key=provider["api_key"],
-                        payload=payload,
-                        provider_id=provider_id,
-                        model_name=model_name,
+        for candidate_index, candidate_name in enumerate(model_candidates):
+            last_error = None
+            for attempt in range(1, max_attempts + 1):
+                protocol_order = self._build_text_protocol_order(provider_id, provider.get("api_protocol"))
+                for index, protocol in enumerate(protocol_order):
+                    endpoint, payload = self._build_text_protocol_payload(
+                        provider=provider,
+                        model_name=candidate_name,
+                        protocol=protocol,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
                     )
-                    content = self._extract_text_from_text_payload(response_payload, protocol)
-                    if not content.strip():
-                        raise CopyModelError("empty_content", "上游未返回文案内容")
-                    if provider_id:
-                        self._text_protocol_overrides[provider_id] = protocol
-                    return content
-                except CopyModelError as error:
-                    last_error = error
-                    if index == 0 and self._should_retry_text_protocol(error):
-                        logger.warning(
-                            "文案协议回退重试: from=%s to=%s provider=%s model=%s reason=%s detail=%s",
-                            protocol,
-                            protocol_order[1],
-                            provider_id or "-",
-                            model_name,
-                            error.reason,
-                            error.detail,
+                    try:
+                        response_payload = self._post_text_json(
+                            endpoint=endpoint,
+                            api_key=provider["api_key"],
+                            payload=payload,
+                            provider_id=provider_id,
+                            model_name=candidate_name,
                         )
-                        continue
-                    break
-            if last_error and attempt < max_attempts and self._should_retry_text_request(last_error):
-                logger.warning(
-                    "文案模型重试: attempt=%s/%s provider=%s model=%s reason=%s detail=%s",
-                    attempt,
-                    max_attempts,
-                    provider_id or "-",
-                    model_name,
-                    last_error.reason,
-                    last_error.detail,
-                )
+                        content = self._extract_text_from_text_payload(response_payload, protocol)
+                        if not content.strip():
+                            raise CopyModelError("empty_content", "上游未返回文案内容")
+                        if provider_id:
+                            self._text_protocol_overrides[provider_id] = protocol
+                        return content
+                    except CopyModelError as error:
+                        last_error = error
+                        if index == 0 and self._should_retry_text_protocol(error):
+                            logger.warning("文案协议回退重试: from=%s to=%s provider=%s model=%s reason=%s detail=%s", protocol, protocol_order[1], provider_id or "-", candidate_name, error.reason, error.detail)
+                            continue
+                        break
+                if last_error and attempt < max_attempts and self._should_retry_text_request(last_error):
+                    logger.warning("文案模型重试: attempt=%s/%s provider=%s model=%s reason=%s detail=%s", attempt, max_attempts, provider_id or "-", candidate_name, last_error.reason, last_error.detail)
+                    continue
+                break
+            if candidate_index < len(model_candidates) - 1 and last_error and should_retry_text_model_name(last_error.reason, last_error.detail):
+                logger.warning("文案模型名降级重试: from=%s to=%s provider=%s reason=%s detail=%s", candidate_name, model_candidates[candidate_index + 1], provider_id or "-", last_error.reason, last_error.detail)
                 continue
-            break
 
         raise CopyModelError("protocol_both_failed", last_error.detail if last_error else "双协议调用失败")
 
@@ -802,7 +865,9 @@ class GenerationPipelineMixin:
                 endpoint,
                 type(error).__name__,
             )
-            raise CopyModelError("upstream_network", str(error)) from error
+            normalized_error = self._normalize_upstream_error_text(str(error))
+            detail = normalized_error or type(error).__name__
+            raise CopyModelError("upstream_network", f"上游网络异常（上游：{detail}）") from error
         try:
             payload_json = json.loads(raw_text)
         except json.JSONDecodeError as error:

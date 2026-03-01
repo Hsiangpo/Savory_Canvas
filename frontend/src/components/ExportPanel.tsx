@@ -1,12 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
-import { File, Image as ImageIcon, Loader2 } from 'lucide-react';
+import { Download, Loader2 } from 'lucide-react';
 import { useAppStore } from '../store';
 import * as api from '../api';
+
+type SavePickerFn = (options?: {
+  suggestedName?: string;
+  types?: Array<{
+    description?: string;
+    accept: Record<string, string[]>;
+  }>;
+}) => Promise<{
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>;
+    close: () => Promise<void>;
+  }>;
+}>;
 
 export default function ExportPanel() {
   const { activeSessionId, latestJob, addToast } = useAppStore();
   const [isExporting, setIsExporting] = useState(false);
-  const [exportType, setExportType] = useState<'long_image' | 'pdf' | null>(null);
   const exportPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const clearExportPoll = () => {
@@ -24,49 +36,86 @@ export default function ExportPanel() {
 
   const canExport = activeSessionId && latestJob && (latestJob.status === 'success' || latestJob.status === 'partial_success');
 
-  const handleExport = async (format: 'long_image' | 'pdf') => {
+  const resolveFileUrl = (fileUrl: string): string => {
+    if (fileUrl.startsWith('http://') || fileUrl.startsWith('https://')) {
+      return fileUrl;
+    }
+    const normalized = fileUrl.replace(/\\/g, '/').replace(/^\/+/, '');
+    if (normalized.startsWith('static/')) {
+      return `${api.STATIC_BASE_URL}/${normalized}`;
+    }
+    return `${api.STATIC_BASE_URL}/static/${normalized}`;
+  };
+
+  const downloadPdfFile = async (fileUrl: string, exportId: string) => {
+    const downloadUrl = resolveFileUrl(fileUrl);
+    const response = await fetch(downloadUrl);
+    if (!response.ok) {
+      throw new Error(`下载失败，状态码: ${response.status}`);
+    }
+    const blob = await response.blob();
+    const fileName = `savory-canvas-${exportId}.pdf`;
+
+    const win = window as Window & { showSaveFilePicker?: SavePickerFn };
+    if (typeof win.showSaveFilePicker === 'function') {
+      const handle = await win.showSaveFilePicker({
+        suggestedName: fileName,
+        types: [{ description: 'PDF 文件', accept: { 'application/pdf': ['.pdf'] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    }
+
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(blobUrl);
+  };
+
+  const handleExport = async () => {
     if (!canExport || !activeSessionId || !latestJob) return;
 
     setIsExporting(true);
-    setExportType(format);
     clearExportPoll();
 
     try {
       const task = await api.createExport({
         session_id: activeSessionId,
         job_id: latestJob.id,
-        export_format: format
+        export_format: 'pdf'
       });
 
       exportPollRef.current = setInterval(async () => {
         try {
           const exportTask = await api.getExport(task.id);
           if (exportTask.status === 'success') {
-            setIsExporting(false);
-            setExportType(null);
             clearExportPoll();
             if (exportTask.file_url) {
-              window.open(exportTask.file_url, '_blank');
-              addToast('导出文件已打开', 'success');
+              await downloadPdfFile(exportTask.file_url, exportTask.id);
+              addToast('PDF 导出成功', 'success');
             } else {
-              addToast('导出成功，但未返回文件链接', 'success');
+              addToast('导出成功，但未返回文件地址', 'error');
             }
+            setIsExporting(false);
           } else if (exportTask.status === 'failed') {
             setIsExporting(false);
-            setExportType(null);
             clearExportPoll();
             addToast(`导出失败: ${exportTask.error_message || '未知错误'}`, 'error');
           }
         } catch {
           setIsExporting(false);
-          setExportType(null);
           clearExportPoll();
-          addToast('获取状态失败', 'error');
+          addToast('导出文件下载失败', 'error');
         }
       }, 2000);
     } catch {
       setIsExporting(false);
-      setExportType(null);
       clearExportPoll();
       addToast('创建任务失败', 'error');
     }
@@ -79,28 +128,19 @@ export default function ExportPanel() {
       </div>
 
       <div style={{ display: 'flex', gap: '12px' }}>
-        <button 
-          className="btn btn-secondary" 
+        <button
+          className="btn btn-secondary"
           style={{ flex: 1, padding: '12px' }}
           disabled={!canExport || isExporting}
-          onClick={() => handleExport('long_image')}
+          onClick={handleExport}
         >
-          {isExporting && exportType === 'long_image' ? <Loader2 size={18} className="animate-spin" /> : <ImageIcon size={18} />}
-          长图导出
-        </button>
-        <button 
-          className="btn btn-secondary" 
-          style={{ flex: 1, padding: '12px' }}
-          disabled={!canExport || isExporting}
-          onClick={() => handleExport('pdf')}
-        >
-          {isExporting && exportType === 'pdf' ? <Loader2 size={18} className="animate-spin" /> : <File size={18} />}
-          PDF 导出
+          {isExporting ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+          导出 PDF
         </button>
       </div>
 
       <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', textAlign: 'center', marginTop: '4px' }}>
-        提示：请确保已有一组成功的生成结果
+        提示：导出时将弹出保存位置选择窗口
       </div>
     </div>
   );

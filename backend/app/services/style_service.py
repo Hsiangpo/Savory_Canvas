@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 from urllib import error as url_error
@@ -18,6 +19,7 @@ from backend.app.repositories.session_repo import SessionRepository
 from backend.app.repositories.style_repo import StyleRepository
 from backend.app.services.model_service import ModelService
 from backend.app.services.style.constants import STAGE_OPTION_RULES
+from backend.app.services.style.payload_mixin import StylePayloadMixin
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +31,7 @@ class StyleFallbackError(Exception):
         self.detail = detail or reason
 
 
-class StyleService:
+class StyleService(StylePayloadMixin):
     def __init__(
         self,
         style_repo: StyleRepository,
@@ -82,7 +84,7 @@ class StyleService:
             )
             raise DomainError(
                 code="E-1004",
-                message="模型服务连接失败，请稍后重试",
+                message=self.build_user_facing_upstream_message(exc),
                 status_code=503,
                 details={"reason": exc.reason},
             ) from exc
@@ -106,7 +108,7 @@ class StyleService:
         if session_id and not self.session_repo.get(session_id):
             raise not_found("会话", session_id)
         normalized_payload = self._normalize_style_payload(style_payload)
-        self._validate_sample_image_asset_id(session_id=session_id, style_payload=normalized_payload, strict=True)
+        self._validate_sample_image_assets(session_id=session_id, style_payload=normalized_payload, strict=True)
         self._sync_sample_image_snapshot(normalized_payload, previous_payload=None)
         now = now_iso()
         profile = {
@@ -136,7 +138,7 @@ class StyleService:
         if style_payload is not None:
             previous_payload = self._normalize_style_payload(dict(profile.get("style_payload") or {}))
             normalized_payload = self._normalize_style_payload(style_payload)
-            self._validate_sample_image_asset_id(
+            self._validate_sample_image_assets(
                 session_id=profile.get("session_id"),
                 style_payload=normalized_payload,
                 strict=True,
@@ -153,212 +155,6 @@ class StyleService:
         if not deleted:
             raise not_found("风格", style_id)
         return True
-
-    def _normalize_style_payload(self, style_payload: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(style_payload, dict):
-            raise DomainError(code="E-1099", message="style_payload 结构不合法", status_code=400)
-        legacy_prompt_example = self._coerce_text(style_payload.get("background_decor"), default="")
-        painting_style = self._coerce_text(style_payload.get("painting_style"), default="手绘插画")
-        color_mood = self._coerce_text(style_payload.get("color_mood"), default="温暖治愈")
-        prompt_example = self._coerce_text(
-            style_payload.get("prompt_example"),
-            default=legacy_prompt_example or "请保持统一风格与清晰图文布局。",
-        )
-        style_prompt = self._coerce_text(style_payload.get("style_prompt"), default=prompt_example)
-        sample_image_asset_id = style_payload.get("sample_image_asset_id")
-        if sample_image_asset_id is not None and (not isinstance(sample_image_asset_id, str) or not sample_image_asset_id.strip()):
-            raise DomainError(code="E-1099", message="sample_image_asset_id 不合法", status_code=400)
-        sample_image_file_path = style_payload.get("sample_image_file_path")
-        if sample_image_file_path is not None and (
-            not isinstance(sample_image_file_path, str) or not sample_image_file_path.strip()
-        ):
-            raise DomainError(code="E-1099", message="sample_image_file_path 不合法", status_code=400)
-        extra_keywords = style_payload.get("extra_keywords")
-        if extra_keywords is None:
-            extra_keywords = []
-        if not isinstance(extra_keywords, list):
-            raise DomainError(code="E-1099", message="extra_keywords 必须为数组", status_code=400)
-        normalized_keywords = self._normalize_keyword_list(extra_keywords)
-        normalized_payload = {
-            "painting_style": painting_style,
-            "color_mood": color_mood,
-            "prompt_example": prompt_example,
-            "style_prompt": style_prompt,
-            "sample_image_asset_id": sample_image_asset_id.strip() if isinstance(sample_image_asset_id, str) else None,
-            "extra_keywords": normalized_keywords,
-        }
-        if isinstance(sample_image_file_path, str) and sample_image_file_path.strip():
-            normalized_payload["sample_image_file_path"] = sample_image_file_path.strip()
-        if isinstance(style_payload.get("force_partial_fail"), bool):
-            normalized_payload["force_partial_fail"] = style_payload["force_partial_fail"]
-        if isinstance(style_payload.get("image_count"), (int, str)):
-            normalized_payload["image_count"] = style_payload["image_count"]
-        if isinstance(style_payload.get("draft_style_id"), str):
-            normalized_payload["draft_style_id"] = style_payload["draft_style_id"]
-        if "allocation_plan" in style_payload:
-            normalized_payload["allocation_plan"] = self._normalize_allocation_plan(style_payload.get("allocation_plan"))
-        return normalized_payload
-
-    def _coerce_text(self, value: Any, *, default: str) -> str:
-        if isinstance(value, str):
-            text = value.strip()
-            if text:
-                return text
-        if isinstance(value, list):
-            merged = "、".join(str(item).strip() for item in value if str(item).strip())
-            if merged:
-                return merged
-        return default
-
-    def _normalize_keyword_list(self, values: list[Any]) -> list[str]:
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for value in values:
-            text = str(value).strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            normalized.append(text)
-        return normalized
-
-    def _normalize_allocation_plan(self, value: Any) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        normalized_items: list[dict[str, Any]] = []
-        for item in value[:10]:
-            if not isinstance(item, dict):
-                continue
-            slot_index_raw = item.get("slot_index")
-            slot_index = int(slot_index_raw) if isinstance(slot_index_raw, (int, float, str)) and str(slot_index_raw).isdigit() else 0
-            if slot_index <= 0:
-                continue
-            focus_title = str(item.get("focus_title") or "").strip()
-            focus_description = str(item.get("focus_description") or "").strip()
-            if not focus_description:
-                continue
-            normalized_items.append(
-                {
-                    "slot_index": slot_index,
-                    "focus_title": focus_title or f"第{slot_index}张重点",
-                    "focus_description": focus_description,
-                    "locations": self._normalize_keyword_list(item.get("locations") if isinstance(item.get("locations"), list) else []),
-                    "scenes": self._normalize_keyword_list(item.get("scenes") if isinstance(item.get("scenes"), list) else []),
-                    "foods": self._normalize_keyword_list(item.get("foods") if isinstance(item.get("foods"), list) else []),
-                    "keywords": self._normalize_keyword_list(item.get("keywords") if isinstance(item.get("keywords"), list) else []),
-                    "source_asset_ids": self._normalize_keyword_list(
-                        item.get("source_asset_ids") if isinstance(item.get("source_asset_ids"), list) else []
-                    ),
-                    "confirmed": bool(item.get("confirmed")),
-                }
-            )
-        normalized_items.sort(key=lambda plan_item: int(plan_item.get("slot_index") or 0))
-        return normalized_items
-
-    def _enrich_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
-        payload = self._normalize_style_payload(dict(profile.get("style_payload") or {}))
-        self._validate_sample_image_asset_id(
-            session_id=profile.get("session_id"),
-            style_payload=payload,
-            strict=False,
-        )
-        sample_image_preview_url = self._resolve_sample_image_preview_url(payload)
-        return {
-            **profile,
-            "style_payload": payload,
-            "sample_image_preview_url": sample_image_preview_url,
-        }
-
-    def _sync_sample_image_snapshot(
-        self,
-        style_payload: dict[str, Any],
-        previous_payload: dict[str, Any] | None,
-    ) -> None:
-        sample_image_asset_id = style_payload.get("sample_image_asset_id")
-        resolved_path = self._resolve_sample_image_file_path_from_asset(sample_image_asset_id)
-        if resolved_path:
-            style_payload["sample_image_file_path"] = resolved_path
-            return
-        if not previous_payload:
-            style_payload.pop("sample_image_file_path", None)
-            return
-        previous_path = previous_payload.get("sample_image_file_path")
-        previous_asset_id = previous_payload.get("sample_image_asset_id")
-        if (
-            isinstance(previous_path, str)
-            and previous_path.strip()
-            and (
-                (isinstance(sample_image_asset_id, str) and sample_image_asset_id == previous_asset_id)
-                or sample_image_asset_id is None
-            )
-        ):
-            style_payload["sample_image_file_path"] = previous_path.strip()
-            return
-        style_payload.pop("sample_image_file_path", None)
-
-    def _resolve_sample_image_file_path_from_asset(self, asset_id: Any) -> str | None:
-        if not isinstance(asset_id, str) or not asset_id.strip() or not self.asset_repo:
-            return None
-        asset = self.asset_repo.get(asset_id)
-        if not asset or asset.get("asset_type") != "image":
-            return None
-        file_path = asset.get("file_path")
-        if isinstance(file_path, str) and file_path.strip():
-            return file_path.strip()
-        return None
-
-    def _validate_sample_image_asset_id(
-        self,
-        *,
-        session_id: str | None,
-        style_payload: dict[str, Any],
-        strict: bool,
-    ) -> None:
-        sample_image_asset_id = style_payload.get("sample_image_asset_id")
-        if not isinstance(sample_image_asset_id, str) or not sample_image_asset_id.strip():
-            style_payload["sample_image_asset_id"] = None
-            return
-        if not self.asset_repo:
-            if strict:
-                raise DomainError(code="E-1099", message="样例图校验服务不可用", status_code=400)
-            style_payload["sample_image_asset_id"] = None
-            return
-        asset = self.asset_repo.get(sample_image_asset_id)
-        if not asset or asset.get("asset_type") != "image":
-            if strict:
-                raise DomainError(code="E-1099", message="样例图必须绑定有效的图片素材", status_code=400)
-            style_payload["sample_image_asset_id"] = None
-            return
-
-    def _resolve_sample_image_preview_url(self, source: Any) -> str | None:
-        payload = source if isinstance(source, dict) else {}
-        file_path = payload.get("sample_image_file_path") if isinstance(payload, dict) else None
-        if isinstance(file_path, str) and file_path.strip():
-            preview_url = self._build_public_image_url(file_path)
-            if preview_url:
-                return preview_url
-        asset_id = source if isinstance(source, str) else payload.get("sample_image_asset_id")
-        if not isinstance(asset_id, str) or not asset_id.strip() or not self.asset_repo:
-            return None
-        asset = self.asset_repo.get(asset_id)
-        if not asset or asset.get("asset_type") != "image":
-            return None
-        return self._build_public_image_url(asset.get("file_path"))
-
-    def _build_public_image_url(self, file_path: Any) -> str | None:
-        if not isinstance(file_path, str) or not file_path.strip() or not self.storage or not self.public_base_url:
-            return None
-        normalized = file_path.replace("\\", "/")
-        if normalized.startswith("http://") or normalized.startswith("https://"):
-            return normalized
-        if normalized.startswith("images/") or normalized.startswith("generated/"):
-            relative = normalized
-        else:
-            try:
-                resolved = Path(file_path).resolve()
-                relative = resolved.relative_to(self.storage.base_dir.resolve()).as_posix()
-            except Exception:
-                relative = normalized
-        return f"{self.public_base_url}/static/{relative.lstrip('/')}"
 
     def _normalize_stage(self, stage: str) -> str:
         if stage == "init":
@@ -519,38 +315,51 @@ class StyleService:
         strict_json: bool,
     ) -> str:
         provider_id = str(provider.get("id") or "").strip()
-        protocol_order = self._build_protocol_order(provider_id, provider.get("api_protocol"))
+        model_candidates = self._build_model_name_candidates(model_name)
         last_error: StyleFallbackError | None = None
 
-        for index, protocol in enumerate(protocol_order):
-            endpoint, request_body = self._build_protocol_request(
-                provider=provider,
-                protocol=protocol,
-                model_name=model_name,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                strict_json=strict_json,
-            )
-            try:
-                response_payload = self._post_json(endpoint, request_body, provider["api_key"])
-                text = self._extract_text_content(response_payload, protocol)
-                if not text.strip():
-                    raise StyleFallbackError("upstream_empty_text", "上游未返回有效文本")
-                if provider_id:
-                    self._provider_protocol_overrides[provider_id] = protocol
-                return text
-            except StyleFallbackError as exc:
-                last_error = exc
-                if index == 0 and self._should_retry_protocol(exc):
-                    logger.warning(
-                        "风格对话协议回退重试: from=%s to=%s reason=%s detail=%s",
-                        protocol,
-                        protocol_order[1],
-                        exc.reason,
-                        exc.detail,
-                    )
-                    continue
-                break
+        for model_candidate in model_candidates:
+            protocol_order = self._build_protocol_order(provider_id, provider.get("api_protocol"))
+            for index, protocol in enumerate(protocol_order):
+                endpoint, request_body = self._build_protocol_request(
+                    provider=provider,
+                    protocol=protocol,
+                    model_name=model_candidate,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    strict_json=strict_json,
+                )
+                try:
+                    response_payload = self._post_json(endpoint, request_body, provider["api_key"])
+                    text = self._extract_text_content(response_payload, protocol)
+                    if not text.strip():
+                        raise StyleFallbackError("upstream_empty_text", "上游未返回有效文本")
+                    if provider_id:
+                        self._provider_protocol_overrides[provider_id] = protocol
+                    return text
+                except StyleFallbackError as exc:
+                    last_error = exc
+                    if index == 0 and self._should_retry_protocol(exc):
+                        logger.warning(
+                            "风格对话协议回退重试: from=%s to=%s reason=%s detail=%s",
+                            protocol,
+                            protocol_order[1],
+                            exc.reason,
+                            exc.detail,
+                        )
+                        continue
+                    break
+            if self._should_retry_model_name(last_error) and model_candidate != model_candidates[-1]:
+                next_candidate = model_candidates[model_candidates.index(model_candidate) + 1]
+                logger.warning(
+                    "风格对话模型名降级重试: from=%s to=%s reason=%s detail=%s",
+                    model_candidate,
+                    next_candidate,
+                    last_error.reason if last_error else "",
+                    last_error.detail if last_error else "",
+                )
+                continue
+            break
 
         if last_error:
             raise StyleFallbackError("protocol_both_failed", f"双协议调用失败: {last_error.reason} | {last_error.detail}")
@@ -576,39 +385,52 @@ class StyleService:
                 strict_json=strict_json,
             )
         provider_id = str(provider.get("id") or "").strip()
-        protocol_order = self._build_protocol_order(provider_id, provider.get("api_protocol"))
+        model_candidates = self._build_model_name_candidates(model_name)
         last_error: StyleFallbackError | None = None
 
-        for index, protocol in enumerate(protocol_order):
-            endpoint, request_body = self._build_multimodal_protocol_request(
-                provider=provider,
-                protocol=protocol,
-                model_name=model_name,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                image_urls=normalized_urls,
-                strict_json=strict_json,
-            )
-            try:
-                response_payload = self._post_json(endpoint, request_body, provider["api_key"])
-                text = self._extract_text_content(response_payload, protocol)
-                if not text.strip():
-                    raise StyleFallbackError("upstream_empty_text", "上游未返回有效文本")
-                if provider_id:
-                    self._provider_protocol_overrides[provider_id] = protocol
-                return text
-            except StyleFallbackError as exc:
-                last_error = exc
-                if index == 0 and self._should_retry_protocol(exc):
-                    logger.warning(
-                        "多模态协议回退重试: from=%s to=%s reason=%s detail=%s",
-                        protocol,
-                        protocol_order[1],
-                        exc.reason,
-                        exc.detail,
-                    )
-                    continue
-                break
+        for model_candidate in model_candidates:
+            protocol_order = self._build_protocol_order(provider_id, provider.get("api_protocol"))
+            for index, protocol in enumerate(protocol_order):
+                endpoint, request_body = self._build_multimodal_protocol_request(
+                    provider=provider,
+                    protocol=protocol,
+                    model_name=model_candidate,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    image_urls=normalized_urls,
+                    strict_json=strict_json,
+                )
+                try:
+                    response_payload = self._post_json(endpoint, request_body, provider["api_key"])
+                    text = self._extract_text_content(response_payload, protocol)
+                    if not text.strip():
+                        raise StyleFallbackError("upstream_empty_text", "上游未返回有效文本")
+                    if provider_id:
+                        self._provider_protocol_overrides[provider_id] = protocol
+                    return text
+                except StyleFallbackError as exc:
+                    last_error = exc
+                    if index == 0 and self._should_retry_protocol(exc):
+                        logger.warning(
+                            "多模态协议回退重试: from=%s to=%s reason=%s detail=%s",
+                            protocol,
+                            protocol_order[1],
+                            exc.reason,
+                            exc.detail,
+                        )
+                        continue
+                    break
+            if self._should_retry_model_name(last_error) and model_candidate != model_candidates[-1]:
+                next_candidate = model_candidates[model_candidates.index(model_candidate) + 1]
+                logger.warning(
+                    "多模态模型名降级重试: from=%s to=%s reason=%s detail=%s",
+                    model_candidate,
+                    next_candidate,
+                    last_error.reason if last_error else "",
+                    last_error.detail if last_error else "",
+                )
+                continue
+            break
 
         if last_error:
             raise StyleFallbackError("protocol_both_failed", f"双协议调用失败: {last_error.reason} | {last_error.detail}")
@@ -627,6 +449,25 @@ class StyleService:
             if len(normalized) >= 4:
                 break
         return normalized
+
+    def _build_model_name_candidates(self, model_name: str) -> list[str]:
+        primary = str(model_name or "").strip()
+        if not primary:
+            return [primary]
+        candidates = [primary]
+        lowered = primary.lower()
+        if "thinking" not in lowered:
+            return candidates
+        fallback = re.sub(r"[-_]?thinking[-_a-z0-9]*$", "", primary, flags=re.IGNORECASE).strip("-_ ")
+        if fallback and fallback not in candidates:
+            candidates.append(fallback)
+        return candidates
+
+    def _should_retry_model_name(self, error: StyleFallbackError | None) -> bool:
+        if not error or error.reason != "upstream_http_error":
+            return False
+        detail = str(error.detail or "").lower()
+        return "thinking budget" in detail and "thinking level" in detail
 
     def _to_data_url_if_local(self, source: str) -> str | None:
         local_path = self._resolve_local_image_path(source)
@@ -847,6 +688,68 @@ class StyleService:
         if not isinstance(parsed, dict):
             raise StyleFallbackError("upstream_invalid_payload", "上游响应结构非法")
         return parsed
+
+    def build_user_facing_upstream_message(self, error: StyleFallbackError) -> str:
+        reason = str(error.reason or "").strip()
+        detail = self._normalize_upstream_error_detail(error.detail)
+        lowered_detail = detail.lower()
+        if reason in {"routing_unavailable", "text_provider_missing", "text_model_missing", "text_provider_unavailable"}:
+            return "模型服务连接失败：模型配置不可用，请先检查模型设置"
+        if reason in {"protocol_endpoint_not_supported", "protocol_incompatible"}:
+            base = "模型服务连接失败：模型协议不兼容，请切换协议或模型后重试"
+        elif reason == "upstream_timeout_or_network":
+            base = "模型服务连接失败：模型服务连接超时，请稍后重试"
+        elif reason in {
+            "upstream_invalid_json",
+            "upstream_invalid_payload",
+            "responses_missing_text",
+            "chat_missing_text",
+            "upstream_empty_text",
+            "json_missing_object",
+            "json_parse_failed",
+            "json_structure_invalid",
+            "options_missing",
+            "options_title_invalid",
+            "options_items_invalid",
+            "options_items_empty",
+            "options_max_invalid",
+            "options_max_out_of_range",
+        }:
+            base = "模型输出格式异常，请重试"
+        elif reason == "upstream_http_error":
+            base = self._classify_upstream_http_error_message(lowered_detail)
+        elif reason == "protocol_both_failed":
+            base = "模型服务连接失败，请稍后重试"
+        else:
+            base = "模型服务连接失败，请稍后重试"
+        if detail:
+            return f"{base}（上游：{detail}）"
+        return base
+
+    def _classify_upstream_http_error_message(self, lowered_detail: str) -> str:
+        if any(marker in lowered_detail for marker in ("429", "rate limit", "too many requests", "限流")):
+            return "模型服务触发限流，请稍后重试"
+        if any(marker in lowered_detail for marker in ("401", "unauthorized", "api key", "invalid key", "鉴权")):
+            return "模型服务鉴权失败，请检查密钥配置"
+        if any(marker in lowered_detail for marker in ("403", "forbidden", "permission", "权限")):
+            return "模型服务权限不足，请检查模型权限"
+        if any(marker in lowered_detail for marker in ("402", "payment", "insufficient", "quota", "credit", "额度", "余额", "预扣费")):
+            return "模型服务额度不足，请充值后重试"
+        if any(marker in lowered_detail for marker in ("404", "not found", "model not found", "invalid model", "模型不存在")):
+            return "模型不可用，请切换模型后重试"
+        if any(marker in lowered_detail for marker in ("500", "502", "503", "504", "gateway", "upstream")):
+            return "模型服务暂时不可用，请稍后重试"
+        return "模型服务请求失败，请重试"
+
+    def _normalize_upstream_error_detail(self, detail: str | None) -> str:
+        if not isinstance(detail, str):
+            return ""
+        text = " ".join(detail.strip().split())
+        if not text:
+            return ""
+        if len(text) > 220:
+            return f"{text[:220]}..."
+        return text
 
     def _extract_text_content(self, payload: dict[str, Any], protocol: str) -> str:
         if protocol == "responses":

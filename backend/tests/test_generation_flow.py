@@ -128,6 +128,23 @@ def _mock_image_server(mode: str):
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": {"message": "上游服务拥堵"}}).encode("utf-8"))
                 return
+            if mode == "quota_error":
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "error": {
+                                "message": (
+                                    "预扣费额度失败, 用户[90630]剩余额度: 💰0.108174, "
+                                    "需要预扣费额度: 💰0.150000"
+                                )
+                            }
+                        }
+                    ).encode("utf-8")
+                )
+                return
             if mode == "flaky_once":
                 if request_count["value"] == 1:
                     self.send_response(500)
@@ -279,6 +296,23 @@ def test_generation_upstream_invalid_json_maps_to_e1004(client):
         _setup_routing_with_provider_base_url(client, base_url)
         _, job_status = _run_job_expect_e1004(client)
         assert "上游响应格式错误" in job_status["error_message"]
+
+
+@pytest.mark.image_pipeline_real
+def test_generation_quota_error_fails_fast_without_redundant_retries(client):
+    with _mock_image_server("quota_error") as base_url:
+        _setup_routing_with_provider_base_url(client, base_url)
+        job_id, job_status = _run_job_expect_e1004(client)
+        assert "预扣费额度失败" in job_status["error_message"]
+        stages_response = client.get(f"/api/v1/jobs/{job_id}/stages")
+        assert stages_response.status_code == 200
+        image_messages = [
+            item["stage_message"]
+            for item in stages_response.json()["items"]
+            if item["stage"] == "image_generate"
+        ]
+        assert any("第 1 次尝试" in message for message in image_messages)
+        assert all("第 2 次尝试" not in message for message in image_messages)
 
 
 @pytest.mark.image_pipeline_real

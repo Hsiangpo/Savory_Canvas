@@ -61,6 +61,7 @@ class StylePayload(BaseModel):
     prompt_example: str
     style_prompt: str
     sample_image_asset_id: str | None = None
+    sample_image_asset_ids: list[str] = Field(default_factory=list)
     extra_keywords: list[str] = Field(default_factory=list)
 
 
@@ -98,7 +99,9 @@ class InspirationStyleContext(BaseModel):
     style_profile_id: str | None = None
     style_name: str | None = None
     sample_image_asset_id: str | None = None
+    sample_image_asset_ids: list[str] | None = None
     sample_image_preview_url: str | None = None
+    sample_image_preview_urls: list[str] | None = None
     style_payload: StylePayload | None = None
 
 
@@ -135,6 +138,7 @@ class StyleProfile(BaseModel):
     name: str
     style_payload: StylePayload
     sample_image_preview_url: str | None = None
+    sample_image_preview_urls: list[str] | None = None
     is_builtin: bool
     created_at: str
     updated_at: str

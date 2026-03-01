@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 from datetime import datetime, timezone
+from urllib import error as url_error
 from uuid import uuid4
 
 import pytest
@@ -85,6 +87,7 @@ def test_generation_copy_result_respects_content_mode(
         assert unexpected_prompt_fragment not in prompt_text
     assert "请只生成一张图片" in prompt_text
     assert "禁止拼贴" in prompt_text
+    assert "禁止外圈留白" in prompt_text or "禁止留白边框" in prompt_text
     assert "第1/1张" not in prompt_text
     assert "{'" not in prompt_text
 
@@ -300,6 +303,10 @@ def test_build_prompt_specs_prefers_confirmed_allocation_plan(client, monkeypatc
     assert len(specs) == 2
     assert "钟楼" in specs[0]["prompt_text"]
     assert "肉夹馍" in specs[1]["prompt_text"]
+    assert "名称+10-20字简短介绍" in specs[0]["prompt_text"]
+    assert "禁止出现“（15字）/15字/字数说明”" in specs[0]["prompt_text"]
+    assert "图解" in specs[0]["prompt_text"]
+    assert "禁止外圈留白" in specs[0]["prompt_text"] or "禁止留白边框" in specs[0]["prompt_text"]
     assert specs[0]["asset_refs"] == ["asset-a"]
     assert specs[1]["asset_refs"] == ["asset-b"]
 
@@ -330,6 +337,71 @@ def test_generate_image_binary_retry_without_references_when_upstream_rejects(cl
     assert len(payloads) == 2
     assert "input_images" in payloads[0]
     assert "input_images" not in payloads[1]
+
+
+def test_build_image_generation_payload_uses_large_size_for_seedream(client):
+    worker = client.app.state.services.generation.worker
+    payload = worker._build_image_generation_payload(
+        model_name="doubao-seedream-5-0-260128",
+        prompt="测试提示词",
+        reference_image_paths=[],
+    )
+    assert payload["size"] == "1920x1920"
+
+
+@pytest.mark.image_pipeline_real
+def test_generate_image_binary_retries_with_larger_size_when_upstream_requires_min_pixels(client, monkeypatch):
+    worker = client.app.state.services.generation.worker
+    worker_module = _import_generation_worker_module()
+
+    payloads: list[dict] = []
+
+    def fake_post_json(*, provider_id, model_name, url, api_key, payload):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            raise worker_module.DomainError(
+                code="E-1004",
+                message=(
+                    "图片生成失败：The parameter `size` specified in the request is not valid: "
+                    "image size must be at least 3686400 pixels."
+                ),
+                status_code=400,
+            )
+        return {"data": [{"b64_json": PNG_BASE64}]}
+
+    monkeypatch.setattr(worker, "_post_json", fake_post_json)
+    image_bytes, extension = worker._generate_image_binary(
+        image_provider={"id": "provider-x", "base_url": "https://example.com/v1", "api_key": "test"},
+        provider_id="provider-x",
+        model_name="gpt-image-1",
+        prompt="请生成一张示例图",
+        reference_image_paths=None,
+    )
+    assert extension == "png"
+    assert image_bytes == base64.b64decode(PNG_BASE64)
+    assert len(payloads) == 2
+    assert payloads[0]["size"] == "1024x1024"
+    assert payloads[1]["size"] == "1920x1920"
+
+
+def test_postprocess_generated_image_trims_uniform_outer_border(client):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    worker = client.app.state.services.generation.worker
+    canvas = Image.new("RGB", (140, 140), (235, 220, 198))
+    content = Image.new("RGB", (96, 96), (200, 88, 66))
+    canvas.paste(content, (22, 22))
+    raw_bytes = io.BytesIO()
+    canvas.save(raw_bytes, format="PNG")
+
+    processed_bytes, processed_extension = worker._postprocess_generated_image(raw_bytes.getvalue(), "png")
+    assert processed_extension == "png"
+    with Image.open(io.BytesIO(processed_bytes)) as processed:
+        assert processed.size[0] < 140
+        assert processed.size[1] < 140
+        assert processed.size[0] >= 96
+        assert processed.size[1] >= 96
 
 
 def test_collect_style_reference_paths_only_uses_style_reference_sources(client):
@@ -500,3 +572,58 @@ def test_generation_copy_result_retries_with_strict_json_prompt(client, monkeypa
     assert len(result["guide_sections"]) >= 3
     assert len(call_history) == 2
     assert "必须只输出一个 JSON 对象" in call_history[1]
+
+
+def test_copy_text_model_retries_base_model_when_thinking_variant_conflicts(client, monkeypatch):
+    worker = client.app.state.services.generation.worker
+    provider = {
+        "id": "provider-demo",
+        "base_url": "https://example.com/v1",
+        "api_key": "secret",
+        "api_protocol": "responses",
+    }
+    called_models: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict):
+            self._payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        def read(self):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(upstream_request, timeout=45):
+        assert timeout == 45
+        payload = json.loads((upstream_request.data or b"{}").decode("utf-8", errors="ignore"))
+        model = str(payload.get("model") or "")
+        called_models.append(model)
+        if model == "gemini-3-pro-preview-thinking-low":
+            body = '{"error":{"message":"You can only set only one of thinking budget and thinking level.","type":"new_api_error"}}'
+            raise url_error.HTTPError(
+                url=upstream_request.full_url,
+                code=400,
+                msg="Bad Request",
+                hdrs=None,
+                fp=io.BytesIO(body.encode("utf-8")),
+            )
+        return FakeResponse({"output_text": "文案生成成功"})
+
+    from backend.app.workers.generation import pipeline_mixin as pipeline_module
+
+    monkeypatch.setattr(pipeline_module.request, "urlopen", fake_urlopen)
+    from backend.app.workers.generation.pipeline_mixin import GenerationPipelineMixin
+
+    content = GenerationPipelineMixin._call_text_model_for_copy(
+        worker,
+        provider=provider,
+        model_name="gemini-3-pro-preview-thinking-low",
+        system_prompt="系统提示词",
+        user_prompt="用户提示词",
+    )
+    assert content == "文案生成成功"
+    assert called_models == ["gemini-3-pro-preview-thinking-low", "gemini-3-pro-preview"]

@@ -67,6 +67,7 @@ export interface StylePayload {
   prompt_example: string;
   style_prompt: string;
   sample_image_asset_id?: string | null;
+  sample_image_asset_ids?: string[];
   extra_keywords: string[];
 }
 
@@ -82,7 +83,9 @@ export interface InspirationStyleContext {
   style_profile_id?: string;
   style_name?: string;
   sample_image_asset_id?: string;
+  sample_image_asset_ids?: string[];
   sample_image_preview_url?: string;
+  sample_image_preview_urls?: string[];
   style_payload?: StylePayload;
 }
 
@@ -132,6 +135,7 @@ export interface StyleProfile {
   name: string;
   style_payload: StylePayload;
   sample_image_preview_url?: string;
+  sample_image_preview_urls?: string[];
   is_builtin: boolean;
   created_at: string;
   updated_at: string;

@@ -27,7 +27,10 @@ class Storage:
         path.write_bytes(content)
         return str(path)
 
-    def save_export(self, filename: str, content: str) -> str:
+    def save_export(self, filename: str, content: str | bytes) -> str:
         path = self.base_dir / "exports" / filename
-        path.write_text(content, encoding="utf-8")
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8")
         return str(path)

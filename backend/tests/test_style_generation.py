@@ -414,6 +414,69 @@ def test_style_chat_protocol_fallback_when_responses_returns_500_not_implemented
     assert "电影写实" in body["options"]["items"]
 
 
+def test_style_chat_multimodal_retries_with_base_model_when_thinking_variant_conflicts(client, monkeypatch):
+    from backend.app.services import style_service as style_service_module
+
+    service = client.app.state.services.style
+    provider = {
+        "id": "provider-demo",
+        "base_url": "https://example.com",
+        "api_key": "secret",
+        "api_protocol": "responses",
+    }
+    called_models: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict):
+            self._payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        def read(self):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(upstream_request, timeout=35):
+        assert timeout == 35
+        payload = json.loads((upstream_request.data or b"{}").decode("utf-8", errors="ignore"))
+        model_name = str(payload.get("model") or "")
+        called_models.append(model_name)
+        if model_name == "gemini-3-pro-preview-thinking-low":
+            failure_body = (
+                '{"error":{"message":"You can only set only one of thinking budget and thinking level.","type":"new_api_error"}}'
+            )
+            raise url_error.HTTPError(
+                url=upstream_request.full_url,
+                code=400,
+                msg="Bad Request",
+                hdrs=None,
+                fp=io.BytesIO(failure_body.encode("utf-8")),
+            )
+        return FakeResponse(
+            {
+                "output_text": (
+                    '{"reply":"已自动切换基础模型并生成候选",'
+                    '"options":{"title":"请选择绘画风格","items":["复古手账","手绘水彩"],"max":2}}'
+                )
+            }
+        )
+
+    monkeypatch.setattr(style_service_module.request, "urlopen", fake_urlopen)
+    text = service._call_text_model_with_images(
+        provider,
+        "gemini-3-pro-preview-thinking-low",
+        "系统提示词",
+        "用户提示词",
+        ["https://example.com/demo.png"],
+        strict_json=False,
+    )
+    assert "已自动切换基础模型并生成候选" in text
+    assert called_models == ["gemini-3-pro-preview-thinking-low", "gemini-3-pro-preview"]
+
+
 def test_style_chat_retry_strict_json_success(client, monkeypatch):
     setup_model_routing(client)
     session = create_session(client)
@@ -599,6 +662,34 @@ def test_style_profile_accepts_image_sample_asset_and_returns_preview_url(client
     assert body["sample_image_preview_url"].startswith("http://127.0.0.1:8887/static/images/")
 
 
+def test_style_profile_accepts_multiple_sample_assets_and_returns_preview_urls(client):
+    session = create_session(client, title="多样例图风格会话")
+    image_asset_a = _insert_image_asset(client, session["id"], "sample-a.png")
+    image_asset_b = _insert_image_asset(client, session["id"], "sample-b.png")
+
+    create_response = client.post(
+        "/api/v1/styles",
+        json={
+            "session_id": session["id"],
+            "name": "多样例图风格",
+            "style_payload": {
+                "painting_style": "手绘水彩",
+                "color_mood": "温暖治愈",
+                "prompt_example": "请保持复古旅行手账风格。",
+                "style_prompt": "请保持复古旅行手账风格。",
+                "sample_image_asset_ids": [image_asset_a["id"], image_asset_b["id"]],
+                "extra_keywords": [],
+            },
+        },
+    )
+    assert create_response.status_code == 201
+    body = create_response.json()
+    assert body["style_payload"]["sample_image_asset_ids"] == [image_asset_a["id"], image_asset_b["id"]]
+    assert body["style_payload"]["sample_image_asset_id"] == image_asset_a["id"]
+    assert len(body["sample_image_preview_urls"]) == 2
+    assert all(url.startswith("http://127.0.0.1:8887/static/images/") for url in body["sample_image_preview_urls"])
+
+
 def test_style_profile_update_accepts_cross_session_sample_asset(client):
     session_a = create_session(client, title="样例图会话A")
     session_b = create_session(client, title="样例图会话B")
@@ -622,4 +713,30 @@ def test_style_profile_update_accepts_cross_session_sample_asset(client):
     body = update_response.json()
     assert body["style_payload"]["sample_image_asset_id"] == foreign_image["id"]
     assert body["sample_image_preview_url"].startswith("http://127.0.0.1:8887/static/images/")
+
+
+def test_style_profile_update_supports_multiple_sample_assets(client):
+    session = create_session(client, title="多样例图更新会话")
+    style = create_style(client, session["id"], {"painting_style": "电影写实"})
+    image_asset_a = _insert_image_asset(client, session["id"], "update-a.png")
+    image_asset_b = _insert_image_asset(client, session["id"], "update-b.png")
+
+    update_response = client.patch(
+        f"/api/v1/styles/{style['id']}",
+        json={
+            "style_payload": {
+                "painting_style": "电影写实",
+                "color_mood": "暖金氛围",
+                "prompt_example": "保持统一电影感。",
+                "style_prompt": "保持统一电影感。",
+                "sample_image_asset_ids": [image_asset_a["id"], image_asset_b["id"]],
+                "extra_keywords": [],
+            }
+        },
+    )
+    assert update_response.status_code == 200
+    body = update_response.json()
+    assert body["style_payload"]["sample_image_asset_ids"] == [image_asset_a["id"], image_asset_b["id"]]
+    assert body["style_payload"]["sample_image_asset_id"] == image_asset_a["id"]
+    assert len(body["sample_image_preview_urls"]) == 2
 

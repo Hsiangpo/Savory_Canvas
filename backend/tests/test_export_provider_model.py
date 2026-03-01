@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from conftest import (
     create_generation_job,
@@ -165,6 +166,30 @@ def test_infer_capabilities_supports_nano_banana_variants():
         assert "image_generation" in capabilities
 
 
+def test_infer_capabilities_supports_china_image_model_variants():
+    from backend.app.services.model_service import ModelService
+
+    service = ModelService(config_repo=None, provider_repo=None)  # type: ignore[arg-type]
+    variants = [
+        "qwen-image-plus-2026-01-09",
+        "qwen-image-edit-max-2026-01-16",
+        "doubao-seedream-5-0-260128",
+        "doubao-seededit-3-0-i2i-250628",
+    ]
+    for model_name in variants:
+        capabilities = service._infer_capabilities(model_name)
+        assert "image_generation" in capabilities
+
+
+def test_infer_capabilities_keeps_video_generation_out_of_image_generation():
+    from backend.app.services.model_service import ModelService
+
+    service = ModelService(config_repo=None, provider_repo=None)  # type: ignore[arg-type]
+    capabilities = service._infer_capabilities("wanx2.1-t2v-plus")
+    assert "image_generation" not in capabilities
+    assert "text_generation" in capabilities
+
+
 def test_infer_capabilities_keeps_non_image_model_text_generation():
     from backend.app.services.model_service import ModelService
 
@@ -214,6 +239,40 @@ def test_fetch_provider_models_merges_upstream_and_local_capabilities(monkeypatc
     monkeypatch.setattr("backend.app.services.model_service.request.urlopen", fake_urlopen)
     models = service.fetch_provider_models(provider)
     assert models[0]["name"] == "nano-banana-pro"
+    assert "image_generation" in models[0]["capabilities"]
+    assert "text_generation" in models[0]["capabilities"]
+
+
+def test_fetch_provider_models_merges_qwen_image_as_image_generation_even_when_upstream_is_text(monkeypatch):
+    from backend.app.services.model_service import ModelService
+
+    service = ModelService(config_repo=None, provider_repo=None)  # type: ignore[arg-type]
+    provider = {
+        "base_url": "https://example.com",
+        "api_key": "provider-secret",
+    }
+
+    class FakeResponse:
+        def __init__(self, payload_text: str):
+            self._payload_text = payload_text
+
+        def read(self):
+            return self._payload_text.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(_request, timeout):
+        assert timeout == 10
+        payload = {"data": [{"id": "qwen-image-plus-2026-01-09", "capabilities": ["text_generation"]}]}
+        return FakeResponse(json.dumps(payload))
+
+    monkeypatch.setattr("backend.app.services.model_service.request.urlopen", fake_urlopen)
+    models = service.fetch_provider_models(provider)
+    assert models[0]["name"] == "qwen-image-plus-2026-01-09"
     assert "image_generation" in models[0]["capabilities"]
     assert "text_generation" in models[0]["capabilities"]
 
@@ -318,7 +377,11 @@ def test_export_task_flow(client):
     final_export = wait_for_export_end(client, export_task["id"])
     assert final_export["status"] == "success"
     assert isinstance(final_export.get("file_url", ""), str)
-    assert final_export["file_url"] != ""
+    assert final_export["file_url"].startswith("http://127.0.0.1:8887/static/exports/")
+    relative_path = final_export["file_url"].split("/static/", 1)[1]
+    export_file = Path(client.app.state.services.export.storage.base_dir) / Path(*relative_path.split("/"))
+    assert export_file.is_file()
+    assert export_file.read_bytes().startswith(b"%PDF")
 
 
 def test_generation_requires_model_routing(client):

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import threading
+from pathlib import Path
+from typing import Any
 
 from backend.app.core.utils import now_iso
 from backend.app.repositories.export_repo import ExportRepository
@@ -52,11 +55,13 @@ class ExportWorker:
                 self._fail(export_id, "缺少可导出内容")
                 return
 
-            extension = "pdf" if task["export_format"] == "pdf" else "txt"
-            file_path = self.storage.save_export(
-                filename=f"{export_id}.{extension}",
-                content=copy_result["full_text"],
-            )
+            if task["export_format"] == "pdf":
+                file_content = self._build_pdf_bytes(images=images, copy_result=copy_result)
+                extension = "pdf"
+            else:
+                file_content = str(copy_result.get("full_text") or "")
+                extension = "txt"
+            file_path = self.storage.save_export(filename=f"{export_id}.{extension}", content=file_content)
             self.export_repo.update_state(
                 export_id,
                 status="success",
@@ -75,4 +80,250 @@ class ExportWorker:
             error_code="E-1005",
             error_message=message,
         )
+
+    def _build_pdf_bytes(self, *, images: list[dict[str, Any]], copy_result: dict[str, Any]) -> bytes:
+        from PIL import Image, ImageDraw, ImageFont
+
+        page_width = 1240
+        page_height = 1754
+        margin = 72
+        title_font = self._load_font(size=52, bold=True, fallback=ImageFont)
+        section_font = self._load_font(size=34, bold=True, fallback=ImageFont)
+        text_font = self._load_font(size=28, bold=False, fallback=ImageFont)
+        small_font = self._load_font(size=24, bold=False, fallback=ImageFont)
+
+        pages: list[Image.Image] = []
+        pages.append(
+            self._build_cover_page(
+                page_width=page_width,
+                page_height=page_height,
+                margin=margin,
+                title_font=title_font,
+                section_font=section_font,
+                text_font=text_font,
+                copy_result=copy_result,
+            )
+        )
+        pages.extend(
+            self._build_image_pages(
+                page_width=page_width,
+                page_height=page_height,
+                margin=margin,
+                section_font=section_font,
+                text_font=text_font,
+                small_font=small_font,
+                images=images,
+            )
+        )
+        pages.extend(
+            self._build_copy_pages(
+                page_width=page_width,
+                page_height=page_height,
+                margin=margin,
+                section_font=section_font,
+                text_font=text_font,
+                small_font=small_font,
+                copy_result=copy_result,
+            )
+        )
+        buffer = io.BytesIO()
+        first_page = pages[0].convert("RGB")
+        append_pages = [page.convert("RGB") for page in pages[1:]]
+        first_page.save(buffer, format="PDF", save_all=True, append_images=append_pages, resolution=150.0)
+        return buffer.getvalue()
+
+    def _build_cover_page(
+        self,
+        *,
+        page_width: int,
+        page_height: int,
+        margin: int,
+        title_font,
+        section_font,
+        text_font,
+        copy_result: dict[str, Any],
+    ):
+        from PIL import Image, ImageDraw
+
+        page = Image.new("RGB", (page_width, page_height), "#f7f3ea")
+        draw = ImageDraw.Draw(page)
+        title = str(copy_result.get("title") or "Savory Canvas 导出结果").strip()
+        intro = str(copy_result.get("intro") or "").strip()
+        draw.rectangle((margin, margin, page_width - margin, margin + 8), fill="#f97352")
+        y = margin + 36
+        y = self._draw_wrapped_text(draw, title, title_font, margin, y, page_width - margin, "#1f1f1f", 1.45)
+        y += 18
+        draw.text((margin, y), "导语", font=section_font, fill="#f97352")
+        y += 56
+        self._draw_wrapped_text(
+            draw,
+            intro or "本次导出包含生成图片与结构化文案内容。",
+            text_font,
+            margin,
+            y,
+            page_width - margin,
+            "#2d2d2d",
+            1.6,
+        )
+        return page
+
+    def _build_image_pages(
+        self,
+        *,
+        page_width: int,
+        page_height: int,
+        margin: int,
+        section_font,
+        text_font,
+        small_font,
+        images: list[dict[str, Any]],
+    ) -> list:
+        from PIL import Image, ImageDraw
+
+        pages: list[Image.Image] = []
+        total = len(images)
+        for index, item in enumerate(images, start=1):
+            page = Image.new("RGB", (page_width, page_height), "#ffffff")
+            draw = ImageDraw.Draw(page)
+            draw.text((margin, margin), f"生成结果 {index}/{total}", font=section_font, fill="#1f1f1f")
+            image_path = self._resolve_image_file_path(item.get("image_path"))
+            if image_path and image_path.is_file():
+                with Image.open(image_path) as raw:
+                    image = raw.convert("RGB")
+                max_width = page_width - margin * 2
+                max_height = page_height - 520
+                ratio = min(max_width / image.width, max_height / image.height)
+                resized = image.resize((max(1, int(image.width * ratio)), max(1, int(image.height * ratio))))
+                paste_x = (page_width - resized.width) // 2
+                paste_y = margin + 90
+                page.paste(resized, (paste_x, paste_y))
+                y = paste_y + resized.height + 40
+            else:
+                y = margin + 140
+                draw.text((margin, y), "图片文件不存在，已跳过渲染。", font=text_font, fill="#d9464a")
+                y += 70
+            prompt = str(item.get("prompt_text") or "").strip()
+            draw.text((margin, y), "生图提示词摘要", font=small_font, fill="#f97352")
+            y += 44
+            self._draw_wrapped_text(
+                draw,
+                self._truncate_text(prompt, max_chars=220),
+                text_font,
+                margin,
+                y,
+                page_width - margin,
+                "#2d2d2d",
+                1.55,
+            )
+            pages.append(page)
+        return pages
+
+    def _build_copy_pages(
+        self,
+        *,
+        page_width: int,
+        page_height: int,
+        margin: int,
+        section_font,
+        text_font,
+        small_font,
+        copy_result: dict[str, Any],
+    ) -> list:
+        from PIL import Image, ImageDraw
+
+        pages: list[Image.Image] = []
+        page = Image.new("RGB", (page_width, page_height), "#fffdfa")
+        draw = ImageDraw.Draw(page)
+        y = margin
+        draw.text((margin, y), "图文文案", font=section_font, fill="#1f1f1f")
+        y += 64
+        blocks: list[tuple[str, str]] = [("导语", str(copy_result.get("intro") or "").strip())]
+        sections = copy_result.get("guide_sections")
+        if isinstance(sections, list):
+            for idx, section in enumerate(sections, start=1):
+                if not isinstance(section, dict):
+                    continue
+                heading = str(section.get("heading") or f"段落 {idx}").strip()
+                content = str(section.get("content") or "").strip()
+                blocks.append((heading, content))
+        blocks.append(("结语", str(copy_result.get("ending") or "").strip()))
+
+        for title, content in blocks:
+            estimated_line_height = int(getattr(text_font, "size", 28) * 1.6)
+            estimated_lines = max(1, len(content) // 20 + 1)
+            estimated_height = 56 + estimated_line_height * estimated_lines + 24
+            if y + estimated_height > page_height - margin:
+                pages.append(page)
+                page = Image.new("RGB", (page_width, page_height), "#fffdfa")
+                draw = ImageDraw.Draw(page)
+                y = margin
+                draw.text((margin, y), "图文文案（续）", font=small_font, fill="#a45f2a")
+                y += 56
+            draw.text((margin, y), title, font=small_font, fill="#f97352")
+            y += 38
+            y = self._draw_wrapped_text(draw, content or "无", text_font, margin, y, page_width - margin, "#2d2d2d", 1.6)
+            y += 22
+        pages.append(page)
+        return pages
+
+    def _draw_wrapped_text(
+        self,
+        draw,
+        text: str,
+        font,
+        x: int,
+        y: int,
+        max_x: int,
+        fill: str,
+        line_height_ratio: float,
+    ) -> int:
+        max_width = max_x - x
+        line_height = int(getattr(font, "size", 24) * line_height_ratio)
+        for line in str(text or "").splitlines() or [""]:
+            current = ""
+            for char in line:
+                probe = current + char
+                box = draw.textbbox((0, 0), probe, font=font)
+                width = box[2] - box[0]
+                if width <= max_width:
+                    current = probe
+                    continue
+                if current:
+                    draw.text((x, y), current, font=font, fill=fill)
+                    y += line_height
+                current = char
+            draw.text((x, y), current or " ", font=font, fill=fill)
+            y += line_height
+        return y
+
+    def _truncate_text(self, text: str, *, max_chars: int) -> str:
+        normalized = str(text or "").strip()
+        if len(normalized) <= max_chars:
+            return normalized
+        return normalized[:max_chars].rstrip() + "…"
+
+    def _resolve_image_file_path(self, image_path: Any) -> Path | None:
+        if not isinstance(image_path, str) or not image_path.strip():
+            return None
+        raw = Path(image_path)
+        if raw.is_file():
+            return raw
+        normalized = image_path.replace("\\", "/").lstrip("/")
+        if normalized.startswith("static/"):
+            normalized = normalized[len("static/") :]
+        return self.storage.base_dir / normalized
+
+    def _load_font(self, *, size: int, bold: bool, fallback):
+        candidates = [
+            "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+            "C:/Windows/Fonts/simsun.ttc",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
+        for font_path in candidates:
+            try:
+                return fallback.truetype(font_path, size=size)
+            except Exception:
+                continue
+        return fallback.load_default()
 

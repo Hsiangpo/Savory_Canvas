@@ -15,16 +15,17 @@ from backend.app.services.inspiration.constants import (
     IMAGE_COUNT_EXTRACT_SYSTEM_PROMPT,
     PROMPT_ACTION_OPTIONS,
     PROMPT_READINESS_SYSTEM_PROMPT,
-    STYLE_REQUIREMENT_SYSTEM_PROMPT,
     VISION_ERROR_MESSAGE,
     WELCOME_MESSAGE,
 )
+from backend.app.services.inspiration.requirement_mixin import InspirationRequirementMixin
+from backend.app.services.inspiration.style_save_mixin import InspirationStyleSaveMixin
 from backend.app.services.style_service import StyleFallbackError
 
 logger = logging.getLogger(__name__)
 
 
-class InspirationFlowMixin:
+class InspirationFlowMixin(InspirationRequirementMixin, InspirationStyleSaveMixin):
     def _resolve_prompt_action_options(
         self,
         session: dict[str, Any],
@@ -86,70 +87,6 @@ class InspirationFlowMixin:
         )
         return created["id"]
 
-    def _create_saved_style(self, session: dict[str, Any], state: dict[str, Any]) -> None:
-        now = now_iso()
-        self.style_repo.create(
-            {
-                "id": new_id(),
-                "session_id": session["id"],
-                "name": f"灵感风格-{now[11:19].replace(':', '')}",
-                "style_payload": self._build_style_payload(state),
-                "is_builtin": False,
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
-
-    def _build_style_requirement_reply(
-        self,
-        session: dict[str, Any],
-        state: dict[str, Any],
-        profile: dict[str, Any],
-    ) -> str:
-        style_payload = self._build_style_payload(state)
-        style_text = self._format_style_payload_text(style_payload)
-        recent_user_context = self._collect_recent_user_context(session["id"], limit=6)
-        user_prompt = (
-            f"当前风格：{profile['name']}。\n"
-            f"风格参数：{style_text}。\n"
-            f"最近用户上下文：{recent_user_context or '无'}。\n"
-            "请给出引导式回复，帮助用户补齐可执行的创作需求。"
-        )
-        model_reply = self._call_text_model_with_retry(
-            session_id=session["id"],
-            system_prompt=STYLE_REQUIREMENT_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            strict_json=False,
-        ).strip()
-        if model_reply:
-            return model_reply
-        raise DomainError(code="E-1004", message="模型输出为空，请稍后重试", status_code=503)
-
-    def _build_collecting_requirement_reply(
-        self,
-        session: dict[str, Any],
-        state: dict[str, Any],
-        user_text: str,
-    ) -> str:
-        style_payload = self._build_style_payload(state)
-        style_text = self._format_style_payload_text(style_payload)
-        recent_user_context = self._collect_recent_user_context(session["id"], limit=6)
-        user_prompt = (
-            f"已确定风格参数：{style_text}。\n"
-            f"用户本轮输入：{user_text or '无'}。\n"
-            f"最近用户上下文：{recent_user_context or '无'}。\n"
-            "请继续引导用户补齐可执行需求，重点确认：生成张数、地点、景点、美食与画面重点。"
-        )
-        model_reply = self._call_text_model_with_retry(
-            session_id=session["id"],
-            system_prompt=STYLE_REQUIREMENT_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            strict_json=False,
-        ).strip()
-        if model_reply:
-            return model_reply
-        raise DomainError(code="E-1004", message="模型输出为空，请稍后重试", status_code=503)
-
     def _build_allocation_plan(
         self,
         *,
@@ -166,6 +103,7 @@ class InspirationFlowMixin:
         if not source_asset_ids:
             raise DomainError(code="E-1003", message="素材不足，无法完成分图确认", status_code=400)
         candidates = state.get("asset_candidates") if isinstance(state.get("asset_candidates"), dict) else {}
+        locations = "、".join(candidates.get("locations") or []) or "无"
         foods = "、".join(candidates.get("foods") or []) or "无"
         scenes = "、".join(candidates.get("scenes") or []) or "无"
         keywords = "、".join(candidates.get("keywords") or []) or "无"
@@ -174,6 +112,7 @@ class InspirationFlowMixin:
         user_prompt = (
             f"目标张数：{image_count}\n"
             f"风格参数：{style_text}\n"
+            f"已提取地点：{locations}\n"
             f"已提取美食：{foods}\n"
             f"已提取景点：{scenes}\n"
             f"已提取关键词：{keywords}\n"
@@ -229,11 +168,9 @@ class InspirationFlowMixin:
         if not isinstance(items, list) or len(items) < image_count:
             raise DomainError(code="E-1004", message="分图确认失败：模型返回的分图数量不足，请重试", status_code=503)
         valid_source_ids = {asset_id for asset_id in source_asset_ids if asset_id}
-        fallback_source_ids = [asset_id for asset_id in source_asset_ids if asset_id][:3]
-        fallback_locations = self._normalize_asset_list(asset_candidates.get("locations")) or []
-        fallback_scenes = self._normalize_asset_list(asset_candidates.get("scenes")) or []
-        fallback_foods = self._normalize_asset_list(asset_candidates.get("foods")) or []
-        fallback_keywords = self._normalize_asset_list(asset_candidates.get("keywords")) or []
+        candidate_locations = self._normalize_asset_list(
+            asset_candidates.get("locations") if isinstance(asset_candidates, dict) else [],
+        )
         normalized_items: list[dict[str, Any]] = []
         for index, raw_item in enumerate(items[:image_count], start=1):
             item = raw_item if isinstance(raw_item, dict) else {}
@@ -244,13 +181,13 @@ class InspirationFlowMixin:
             slot_index = slot_index_raw if isinstance(slot_index_raw, int) and slot_index_raw > 0 else index
             source_ids = self._normalize_source_asset_ids(item.get("source_asset_ids"), valid_source_ids)
             if not source_ids:
-                source_ids = list(fallback_source_ids)
-            if not source_ids:
                 raise DomainError(code="E-1004", message="分图确认失败：缺少可追溯素材来源，请重试", status_code=503)
-            locations = self._normalize_asset_list(item.get("locations")) or fallback_locations
-            scenes = self._normalize_asset_list(item.get("scenes")) or fallback_scenes
-            foods = self._normalize_asset_list(item.get("foods")) or fallback_foods
-            keywords = self._normalize_asset_list(item.get("keywords")) or fallback_keywords
+            locations = self._normalize_asset_list(item.get("locations"))
+            if not locations and candidate_locations:
+                locations = candidate_locations[:4]
+            scenes = self._normalize_asset_list(item.get("scenes"))
+            foods = self._normalize_asset_list(item.get("foods"))
+            keywords = self._normalize_asset_list(item.get("keywords"))
             normalized_items.append(
                 {
                     "slot_index": slot_index,
@@ -596,16 +533,23 @@ class InspirationFlowMixin:
         if isinstance(keywords, list) and keywords:
             lines.append("风格细节关键词：" + "、".join(str(item) for item in keywords if str(item).strip()))
         merged_attachments = list(attachments)
-        sample_image_asset_id = payload.get("sample_image_asset_id")
-        sample_preview_url = self.style_service._resolve_sample_image_preview_url(payload)
-        if isinstance(sample_preview_url, str) and sample_preview_url.strip():
+        sample_image_asset_ids = payload.get("sample_image_asset_ids")
+        if not isinstance(sample_image_asset_ids, list):
+            sample_image_asset_id = payload.get("sample_image_asset_id")
+            sample_image_asset_ids = [sample_image_asset_id] if isinstance(sample_image_asset_id, str) and sample_image_asset_id.strip() else []
+        sample_preview_urls = self.style_service._resolve_sample_image_preview_urls(payload)
+        for index, sample_preview_url in enumerate(sample_preview_urls):
+            if not isinstance(sample_preview_url, str) or not sample_preview_url.strip():
+                continue
+            asset_id = sample_image_asset_ids[index] if index < len(sample_image_asset_ids) else f"style-sample-{profile.get('id', '')}-{index + 1}"
             merged_attachments.append(
                 self._build_attachment(
-                    asset_id=sample_image_asset_id if isinstance(sample_image_asset_id, str) else f"style-sample-{profile.get('id', '')}",
+                    asset_id=asset_id,
                     attachment_type="image",
-                    name="风格样例图",
+                    name=f"风格样例图{index + 1}",
                     preview_url=sample_preview_url,
                     status="ready",
+                    usage_type="style_reference",
                 )
             )
         return "\n".join(lines), merged_attachments
@@ -628,27 +572,24 @@ class InspirationFlowMixin:
             raise DomainError(code="E-1006", message="文字模型不存在", status_code=400)
         if "vision" not in (target_model.get("capabilities") or []):
             raise DomainError(code="E-1010", message=VISION_ERROR_MESSAGE, status_code=400)
-    def _extract_asset_candidates(self, session_id: str, user_hint: str) -> dict[str, Any]:
+    def _extract_asset_candidates(self, session_id: str, user_hint: str, style_prompt: str = "") -> dict[str, Any]:
         assets = self.asset_repo.list_by_session(session_id)
         source_assets = [asset for asset in assets if isinstance(asset.get("id"), str)]
         source_asset_ids = [str(asset["id"]) for asset in source_assets if isinstance(asset.get("id"), str)]
-        extraction_context = self._build_asset_extraction_context(session_id, source_assets, user_hint)
-        extracted = self._extract_assets_with_llm(session_id, extraction_context)
-        recent_user_context = self._collect_recent_user_context(session_id, limit=8)
-        focus = self._infer_asset_focus(user_hint=user_hint, recent_user_context=recent_user_context)
-        locations = extracted["locations"]
-        scenes = self._merge_keyword_values(extracted["scenes"], locations)
-        foods = extracted["foods"]
-        if focus == "food_only":
-            scenes = []
-            keywords = self._merge_keyword_values(extracted["keywords"], locations + foods)
-        elif focus == "scene_only":
-            foods = []
-            keywords = self._merge_keyword_values(extracted["keywords"], locations + scenes)
-        else:
-            keywords = self._merge_keyword_values(extracted["keywords"], locations + scenes + foods)
-        confidence = extracted["confidence"]
+        text_context = self._build_asset_text_context(session_id, source_assets, user_hint, style_prompt=style_prompt)
+        text_extracted = self._extract_assets_with_llm(session_id, text_context)
+        image_urls = self._collect_image_urls_from_assets(source_assets)
+        image_extracted: dict[str, Any] | None = None
+        if image_urls:
+            image_extracted = self._extract_image_assets_with_llm(session_id, image_urls, text_context)
+        merged = self._merge_text_and_image_assets(text_extracted, image_extracted)
+        locations = merged["locations"]
+        scenes = merged["scenes"]
+        foods = merged["foods"]
+        keywords = self._merge_keyword_values(merged["keywords"], locations + scenes + foods)
+        confidence = merged["confidence"]
         return {
+            "locations": locations[:8],
             "foods": foods[:10],
             "scenes": scenes[:10],
             "keywords": keywords[:20],
@@ -656,88 +597,35 @@ class InspirationFlowMixin:
             "confidence": confidence,
         }
 
-    def _infer_asset_focus(self, *, user_hint: str, recent_user_context: str) -> str:
-        text = f"{recent_user_context} {user_hint}".lower()
-        no_scene_hints = [
-            "不要景点",
-            "不需要景点",
-            "不含景点",
-            "无景点",
-            "只要美食",
-            "仅美食",
-            "纯美食",
-            "只做美食",
-            "美食攻略",
-        ]
-        no_food_hints = [
-            "不要美食",
-            "不需要美食",
-            "不含美食",
-            "无美食",
-            "只要景点",
-            "仅景点",
-            "纯景点",
-            "只做景点",
-            "景点攻略",
-        ]
-        if any(hint in text for hint in no_scene_hints):
-            return "food_only"
-        if any(hint in text for hint in no_food_hints):
-            return "scene_only"
-        food_keywords = [
-            "美食",
-            "小吃",
-            "饮品",
-            "菜",
-            "面",
-            "馍",
-            "汤",
-            "烤",
-            "biangbiang",
-            "肉夹馍",
-            "羊肉泡馍",
-            "冰峰",
-        ]
-        scene_keywords = [
-            "景点",
-            "景区",
-            "地标",
-            "路线",
-            "行程",
-            "打卡",
-            "钟楼",
-            "华清池",
-            "兵马俑",
-        ]
-        has_food = any(keyword in text for keyword in food_keywords)
-        has_scene = any(keyword in text for keyword in scene_keywords)
-        if has_food and not has_scene:
-            return "food_only"
-        if has_scene and not has_food:
-            return "scene_only"
-        return "mixed"
-
-    def _build_asset_extraction_context(
+    def _build_asset_text_context(
         self,
         session_id: str,
         source_assets: list[dict[str, Any]],
         user_hint: str,
+        style_prompt: str = "",
     ) -> str:
         parts: list[str] = []
         if user_hint.strip():
             parts.append(f"用户本轮补充：{user_hint.strip()}")
+        normalized_style_prompt = style_prompt.strip()
+        if normalized_style_prompt:
+            if len(normalized_style_prompt) > 1800:
+                normalized_style_prompt = f"{normalized_style_prompt[:1800]}..."
+            parts.append(f"当前母提示词：{normalized_style_prompt}")
         recent_user_context = self._collect_recent_user_context(session_id, limit=8)
         if recent_user_context:
             parts.append(f"近期用户上下文：{recent_user_context}")
-        for asset in source_assets:
+        recent_text_assets: list[tuple[str, str]] = []
+        for asset in reversed(source_assets):
             asset_type = str(asset.get("asset_type") or "")
             content = str(asset.get("content") or "").strip()
-            if asset_type in {"food_name", "scenic_name", "text", "transcript"} and content:
-                parts.append(f"{asset_type}: {content}")
-        image_urls = self._collect_image_urls_from_assets(source_assets)
-        image_hint = self._build_image_semantic_hint(session_id, image_urls)
-        if image_hint:
-            parts.append(f"图片语义：{image_hint}")
+            if asset_type not in {"food_name", "scenic_name", "text", "transcript"} or not content:
+                continue
+            recent_text_assets.append((asset_type, content))
+            if len(recent_text_assets) >= 8:
+                break
+        for asset_type, content in reversed(recent_text_assets):
+            parts.append(f"{asset_type}: {content}")
         return "\n".join(parts)
 
     def _collect_session_image_asset_urls(self, session_id: str) -> list[str]:
@@ -747,7 +635,7 @@ class InspirationFlowMixin:
     def _collect_image_urls_from_assets(self, assets: list[dict[str, Any]]) -> list[str]:
         urls: list[str] = []
         seen: set[str] = set()
-        for asset in assets:
+        for asset in reversed(assets):
             if asset.get("asset_type") != "image":
                 continue
             file_path = asset.get("file_path")
@@ -756,24 +644,27 @@ class InspirationFlowMixin:
                 continue
             seen.add(public_url)
             urls.append(public_url)
-        return urls[:4]
+            if len(urls) >= 4:
+                break
+        urls.reverse()
+        return urls
 
-    def _build_image_semantic_hint(self, session_id: str, image_urls: list[str]) -> str:
-        if not image_urls:
-            return ""
-        extracted = self._extract_image_assets_with_llm(session_id, image_urls)
-        terms = self._merge_keyword_values(
-            [],
-            extracted["locations"] + extracted["scenes"] + extracted["foods"] + extracted["keywords"],
-        )
-        return "、".join(terms[:20])
-
-    def _extract_image_assets_with_llm(self, session_id: str, image_urls: list[str]) -> dict[str, Any]:
+    def _extract_image_assets_with_llm(
+        self,
+        session_id: str,
+        image_urls: list[str],
+        context_text: str,
+    ) -> dict[str, Any]:
         self._ensure_vision_capable()
+        normalized_context = context_text.strip() or "无"
         response_text = self._call_vision_model_with_retry(
             session_id=session_id,
             system_prompt=IMAGE_ASSET_EXTRACT_SYSTEM_PROMPT,
-            user_prompt="请根据图片识别地点、景点和食物资产，并输出 JSON。",
+            user_prompt=(
+                "请严格结合下列用户文本上下文，判断图片是风格参考还是内容素材后再提取资产。\n"
+                f"用户文本上下文：\n{normalized_context}\n"
+                "若属于风格参考图，请返回空数组。"
+            ),
             image_urls=image_urls,
             strict_json=True,
         )
@@ -785,6 +676,51 @@ class InspirationFlowMixin:
         confidence_raw = payload.get("confidence")
         confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float)) else 0.8
         confidence = min(1.0, max(0.0, confidence))
+        return {
+            "locations": locations,
+            "scenes": scenes,
+            "foods": foods,
+            "keywords": keywords,
+            "confidence": round(confidence, 2),
+        }
+
+    def _merge_text_and_image_assets(
+        self,
+        text_extracted: dict[str, Any],
+        image_extracted: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        text_locations = self._normalize_asset_list(text_extracted.get("locations"))
+        text_scenes = self._normalize_asset_list(text_extracted.get("scenes"))
+        text_foods = self._normalize_asset_list(text_extracted.get("foods"))
+        text_keywords = self._normalize_asset_list(text_extracted.get("keywords"))
+        text_confidence_raw = text_extracted.get("confidence")
+        text_confidence = float(text_confidence_raw) if isinstance(text_confidence_raw, (int, float)) else 0.8
+        text_confidence = min(1.0, max(0.0, text_confidence))
+        if not image_extracted:
+            return {
+                "locations": text_locations,
+                "scenes": text_scenes,
+                "foods": text_foods,
+                "keywords": text_keywords,
+                "confidence": round(text_confidence, 2),
+            }
+        image_locations = self._normalize_asset_list(image_extracted.get("locations"))
+        image_scenes = self._normalize_asset_list(image_extracted.get("scenes"))
+        image_foods = self._normalize_asset_list(image_extracted.get("foods"))
+        image_keywords = self._normalize_asset_list(image_extracted.get("keywords"))
+        image_confidence_raw = image_extracted.get("confidence")
+        image_confidence = float(image_confidence_raw) if isinstance(image_confidence_raw, (int, float)) else 0.8
+        image_confidence = min(1.0, max(0.0, image_confidence))
+        has_text_assets = bool(text_locations or text_scenes or text_foods)
+        locations = text_locations or image_locations
+        scenes = text_scenes or image_scenes
+        foods = text_foods or image_foods
+        if has_text_assets:
+            keywords = self._merge_keyword_values(text_keywords, locations + scenes + foods)
+            confidence = text_confidence
+        else:
+            keywords = self._merge_keyword_values(text_keywords, image_keywords + locations + scenes + foods)
+            confidence = max(text_confidence, image_confidence)
         return {
             "locations": locations,
             "scenes": scenes,
@@ -829,7 +765,9 @@ class InspirationFlowMixin:
                     break
         raise DomainError(
             code="E-1004",
-            message="模型服务连接失败，请稍后重试",
+            message=self.style_service.build_user_facing_upstream_message(
+                last_error or StyleFallbackError("unknown", "模型服务调用失败")
+            ),
             status_code=503,
             details={"reason": last_error.reason if last_error else "unknown"},
         )
@@ -892,12 +830,14 @@ class InspirationFlowMixin:
 
     def _merge_asset_candidates(self, current: Any, incoming: dict[str, Any]) -> dict[str, Any]:
         base = current if isinstance(current, dict) else {}
+        locations = self._merge_keyword_values(base.get("locations"), incoming.get("locations") or [])
         foods = self._merge_keyword_values(base.get("foods"), incoming.get("foods") or [])
         scenes = self._merge_keyword_values(base.get("scenes"), incoming.get("scenes") or [])
         keywords = self._merge_keyword_values(base.get("keywords"), incoming.get("keywords") or [])
         source_asset_ids = self._merge_keyword_values(base.get("source_asset_ids"), incoming.get("source_asset_ids") or [])
         confidence = incoming.get("confidence") if isinstance(incoming.get("confidence"), (int, float)) else base.get("confidence")
         return {
+            "locations": locations[:8],
             "foods": foods[:10],
             "scenes": scenes[:10],
             "keywords": keywords[:20],
@@ -920,13 +860,20 @@ class InspirationFlowMixin:
         style_profile_id = state.get("draft_style_id")
         style_name = profile.get("name") if profile else None
         style_payload = self._build_style_payload(state)
-        sample_image_asset_id = style_payload.get("sample_image_asset_id")
-        sample_preview_url = self.style_service._resolve_sample_image_preview_url(style_payload)
+        sample_image_asset_ids = style_payload.get("sample_image_asset_ids")
+        if not isinstance(sample_image_asset_ids, list):
+            legacy_asset_id = style_payload.get("sample_image_asset_id")
+            sample_image_asset_ids = [legacy_asset_id] if isinstance(legacy_asset_id, str) and legacy_asset_id.strip() else []
+        sample_preview_urls = self.style_service._resolve_sample_image_preview_urls(style_payload)
+        sample_image_asset_id = sample_image_asset_ids[0] if sample_image_asset_ids else None
+        sample_preview_url = sample_preview_urls[0] if sample_preview_urls else None
         return {
             "style_profile_id": style_profile_id,
             "style_name": style_name,
             "sample_image_asset_id": sample_image_asset_id,
+            "sample_image_asset_ids": sample_image_asset_ids,
             "sample_image_preview_url": sample_preview_url,
+            "sample_image_preview_urls": sample_preview_urls,
             "style_payload": style_payload,
         }
 

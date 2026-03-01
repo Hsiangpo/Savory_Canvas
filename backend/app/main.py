@@ -43,6 +43,17 @@ from backend.app.workers.transcript_worker import TranscriptWorker
 _AUTO_CLEAN_DONE = False
 
 
+def _ensure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+
 def _maybe_cleanup_old_backend_processes() -> None:
     global _AUTO_CLEAN_DONE
     if _AUTO_CLEAN_DONE:
@@ -123,6 +134,7 @@ def _kill_port_listeners(port: int, protected_pids: set[int]) -> None:
 
 
 def create_app() -> FastAPI:
+    _ensure_utf8_stdio()
     _maybe_cleanup_old_backend_processes()
     settings = load_settings()
 
@@ -213,6 +225,8 @@ def create_app() -> FastAPI:
         session_repo=session_repo,
         job_repo=job_repo,
         worker=export_worker,
+        storage=storage,
+        public_base_url=settings.public_base_url,
     )
 
     app = FastAPI(

@@ -211,9 +211,7 @@ class InspirationService(InspirationFlowMixin):
         selected_feedback = "、".join(material_selected_items)
         semantic_feedback_text = "；".join(part for part in (feedback_text, selected_feedback) if part)
         has_user_feedback = bool(semantic_feedback_text) or has_attachment_input
-        should_detect_image_count = any(item.strip().replace("张", "").isdigit() for item in selected_items) or (
-            not isinstance(state.get("image_count"), int) and bool(user_text.strip())
-        )
+        should_detect_image_count = bool(selected_items) or bool(user_text.strip())
         detected_image_count = (
             self._extract_image_count(selected_items, user_text, session_id=session["id"])
             if should_detect_image_count
@@ -280,7 +278,11 @@ class InspirationService(InspirationFlowMixin):
                     style_context=self._build_style_context(state),
                 )
                 return
-            state["asset_candidates"] = self._extract_asset_candidates(session["id"], confirm_feedback or user_text)
+            state["asset_candidates"] = self._extract_asset_candidates(
+                session["id"],
+                confirm_feedback or user_text,
+                str(state.get("style_prompt") or ""),
+            )
             state["allocation_plan"] = self._build_allocation_plan(
                 session=session,
                 state=state,
@@ -369,10 +371,18 @@ class InspirationService(InspirationFlowMixin):
             return
 
         if revise_assets and user_text:
-            revised = self._extract_asset_candidates(session["id"], user_text)
-            state["asset_candidates"] = self._merge_asset_candidates(state.get("asset_candidates"), revised)
+            revised = self._extract_asset_candidates(
+                session["id"],
+                user_text,
+                str(state.get("style_prompt") or ""),
+            )
+            state["asset_candidates"] = revised
         elif user_text:
-            state["asset_candidates"] = self._extract_asset_candidates(session["id"], user_text)
+            state["asset_candidates"] = self._extract_asset_candidates(
+                session["id"],
+                user_text,
+                str(state.get("style_prompt") or ""),
+            )
 
         state["allocation_plan"] = self._build_allocation_plan(
             session=session,
@@ -494,6 +504,7 @@ class InspirationService(InspirationFlowMixin):
                     image_name,
                     image_preview_url,
                     "ready",
+                    usage_type="content_asset",
                 )
             )
         for video in videos:
@@ -525,6 +536,7 @@ class InspirationService(InspirationFlowMixin):
         name: str | None,
         preview_url: str | None,
         status: str,
+        usage_type: str | None = None,
     ) -> dict[str, Any]:
         attachment = {
             "id": asset_id,
@@ -533,6 +545,7 @@ class InspirationService(InspirationFlowMixin):
             "name": name,
             "preview_url": preview_url,
             "status": status,
+            "usage_type": usage_type,
         }
         return attachment
 
@@ -685,7 +698,9 @@ class InspirationService(InspirationFlowMixin):
                     break
         raise DomainError(
             code="E-1004",
-            message="模型服务连接失败，请稍后重试",
+            message=self.style_service.build_user_facing_upstream_message(
+                last_error or StyleFallbackError("unknown", "模型服务调用失败")
+            ),
             status_code=503,
             details={"reason": last_error.reason if last_error else "unknown"},
         )

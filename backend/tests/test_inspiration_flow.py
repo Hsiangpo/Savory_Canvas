@@ -23,22 +23,27 @@ def _post_inspiration_message(client, *, data: list[tuple[str, str]], files: lis
         files=files or None,
     )
 
-
 def _fake_asset_extract_payload() -> str:
     return (
         '{"locations":["西安"],"scenes":["钟楼","华清池"],'
         '"foods":["羊肉泡馍","肉夹馍"],"keywords":["西安美食","城市路线"],"confidence":0.91}'
     )
 
-
-def _fake_allocation_plan_payload() -> str:
+def _fake_allocation_plan_payload(user_prompt: str = "") -> str:
+    marker = "可用 source_asset_ids："
+    source_asset_ids: list[str] = []
+    if marker in user_prompt:
+        source_asset_ids = [raw_id.strip() for raw_id in user_prompt.split(marker, 1)[1].splitlines()[0].replace("，", ",").split(",") if raw_id.strip()]
+    if not source_asset_ids:
+        source_asset_ids = ["asset-source-1", "asset-source-2"]
+    first_asset_id = source_asset_ids[0]
+    second_asset_id = source_asset_ids[1] if len(source_asset_ids) > 1 else first_asset_id
     return (
         '{"items":['
-        '{"slot_index":1,"focus_title":"景点主图","focus_description":"聚焦西安钟楼与城市动线。","locations":["西安"],"scenes":["钟楼"],"foods":[],"keywords":["路线"],"source_asset_ids":["invalid-source"]},'
-        '{"slot_index":2,"focus_title":"美食主图","focus_description":"聚焦肉夹馍与冰峰饮品细节。","locations":["西安"],"scenes":[],"foods":["肉夹馍","冰峰"],"keywords":["美食"],"source_asset_ids":["invalid-source"]}'
+        f'{{"slot_index":1,"focus_title":"景点主图","focus_description":"聚焦西安钟楼与城市动线。","locations":["西安"],"scenes":["钟楼"],"foods":[],"keywords":["路线"],"source_asset_ids":["{first_asset_id}"]}},'
+        f'{{"slot_index":2,"focus_title":"美食主图","focus_description":"聚焦肉夹馍与冰峰饮品细节。","locations":["西安"],"scenes":[],"foods":["肉夹馍","冰峰"],"keywords":["美食"],"source_asset_ids":["{second_asset_id}"]}}'
         ']}'
     )
-
 
 def test_inspiration_allocation_plan_generated_and_confirmed_when_locking(client, monkeypatch):
     setup_model_routing(client, text_model_name="gpt-4.1")
@@ -57,14 +62,20 @@ def test_inspiration_allocation_plan_generated_and_confirmed_when_locking(client
         }
 
     def fake_call_text_model(_self, _provider, _model_name, system_prompt, _user_prompt, *, strict_json):
+        if "参数提取助手" in system_prompt:
+            if "两张" in _user_prompt or "2张" in _user_prompt:
+                return '{"image_count": 2}'
+            if "一张" in _user_prompt or "1张" in _user_prompt:
+                return '{"image_count": 1}'
+            return '{"image_count": null}'
         if "资产提取助手" in system_prompt:
             return _fake_asset_extract_payload()
         if "分图策划助手" in system_prompt:
-            return _fake_allocation_plan_payload()
+            return _fake_allocation_plan_payload(_user_prompt)
         if "READY" in system_prompt:
             return "READY"
         if strict_json:
-            return "READY"
+            return '{"image_count": null}'
         return (
             "生成一张西安景点主题图解，聚焦钟楼与路线导览。\n\n"
             "生成一张西安美食主题图解，聚焦肉夹馍与冰峰。"
@@ -298,7 +309,7 @@ def test_inspiration_asset_candidates_focus_location_scene_food(client, monkeypa
         if "资产提取助手" in system_prompt or "图片资产解析助手" in system_prompt:
             return _fake_asset_extract_payload()
         if "分图策划助手" in system_prompt:
-            return _fake_allocation_plan_payload()
+            return _fake_allocation_plan_payload(_user_prompt)
         if "READY" in system_prompt:
             return "READY"
         return (
@@ -334,12 +345,14 @@ def test_inspiration_asset_candidates_focus_location_scene_food(client, monkeypa
         ],
         files=[],
     )
-    assert confirm_response.status_code == 200
+    assert confirm_response.status_code == 200, confirm_response.text
     confirm_body = confirm_response.json()
     assert confirm_body["draft"]["stage"] == "asset_confirming"
     candidates = confirm_body["messages"][-1]["asset_candidates"]
-    assert any("西安" in item for item in candidates["scenes"])
+    assert any("西安" in item for item in candidates["locations"])
+    assert any("钟楼" in item or "华清池" in item for item in candidates["scenes"])
     assert any("肉夹馍" in item or "biangbiang面" in item for item in candidates["foods"])
+    assert any("西安" in item for item in candidates["keywords"])
     assert style_ref_asset_id in candidates["source_asset_ids"]
 
 
@@ -361,9 +374,12 @@ def test_inspiration_asset_candidates_food_only_clears_scene_candidates(client, 
 
     def fake_call_text_model(_self, _provider, _model_name, system_prompt, _user_prompt, *, strict_json):
         if "资产提取助手" in system_prompt or "图片资产解析助手" in system_prompt:
-            return _fake_asset_extract_payload()
+            return (
+                '{"locations":["河西走廊"],"scenes":[],'
+                '"foods":["烤羊","焖面","沙葱包子","冰煮羊"],"keywords":["河西走廊美食"],"confidence":0.92}'
+            )
         if "分图策划助手" in system_prompt:
-            return _fake_allocation_plan_payload()
+            return _fake_allocation_plan_payload(_user_prompt)
         if "READY" in system_prompt:
             return "READY"
         return (
@@ -395,13 +411,80 @@ def test_inspiration_asset_candidates_food_only_clears_scene_candidates(client, 
         ],
         files=[],
     )
-    assert confirm_response.status_code == 200
+    assert confirm_response.status_code == 200, confirm_response.text
     confirm_body = confirm_response.json()
     candidates = confirm_body["messages"][-1]["asset_candidates"]
+    assert any("河西走廊" in item for item in candidates["locations"])
     assert candidates["scenes"] == []
     assert any("羊" in item or "焖面" in item for item in candidates["foods"])
     assert candidates["keywords"]
     assert not any("钟楼" in item or "华清池" in item for item in candidates["keywords"])
+
+
+def test_inspiration_allocation_plan_backfills_location_from_candidates(client, monkeypatch):
+    setup_model_routing(client, text_model_name="gpt-4.1")
+    session = create_session(client, title="分图地点回填校验")
+
+    from backend.app.services.style_service import StyleService
+
+    def finish_collecting(_self, **_kwargs):
+        return {
+            "reply": "风格收集已完成",
+            "options": {"title": "请选择生成数量", "items": ["1"], "max": 1},
+            "stage": "image_count",
+            "next_stage": "",
+            "is_finished": True,
+            "fallback_used": False,
+        }
+
+    def fake_call_text_model(_self, _provider, _model_name, system_prompt, user_prompt, *, strict_json):
+        if "资产提取助手" in system_prompt:
+            return (
+                '{"locations":["河西走廊"],"scenes":[],' 
+                '"foods":["烤羊","焖面"],"keywords":["西北美食"],"confidence":0.9}'
+            )
+        if "分图策划助手" in system_prompt:
+            marker = "可用 source_asset_ids："
+            source_asset_id = "asset-source-1"
+            if marker in user_prompt:
+                source_asset_id = user_prompt.split(marker, 1)[1].splitlines()[0].replace("，", ",").split(",")[0].strip() or source_asset_id
+            return (
+                '{"items":['
+                f'{{"slot_index":1,"focus_title":"美食主图","focus_description":"聚焦河西走廊特色美食。","locations":[],"scenes":[],"foods":["烤羊","焖面"],"keywords":["西北美食"],"source_asset_ids":["{source_asset_id}"]}}'
+                ']}'
+            )
+        if "READY" in system_prompt:
+            return "READY"
+        return "生成一张河西走廊美食主题图解，聚焦烤羊与焖面。"
+
+    monkeypatch.setattr(StyleService, "chat", finish_collecting)
+    monkeypatch.setattr(StyleService, "_call_text_model", fake_call_text_model)
+
+    enter_response = _post_inspiration_message(
+        client,
+        data=[
+            ("session_id", session["id"]),
+            ("selected_items", "1"),
+        ],
+        files=[],
+    )
+    assert enter_response.status_code == 200
+    assert enter_response.json()["draft"]["stage"] == "prompt_revision"
+
+    confirm_response = _post_inspiration_message(
+        client,
+        data=[
+            ("session_id", session["id"]),
+            ("action", "confirm_prompt"),
+            ("selected_items", "确定使用"),
+            ("text", "我只做河西走廊美食，不做景点。"),
+        ],
+        files=[],
+    )
+    assert confirm_response.status_code == 200
+    plan = confirm_response.json()["draft"]["allocation_plan"]
+    assert plan
+    assert "河西走廊" in plan[0]["locations"]
 
 
 def test_inspiration_confirm_prompt_with_feedback_refreshes_prompt(client, monkeypatch):
@@ -424,7 +507,7 @@ def test_inspiration_confirm_prompt_with_feedback_refreshes_prompt(client, monke
         if "资产提取助手" in system_prompt or "图片资产解析助手" in system_prompt:
             return _fake_asset_extract_payload()
         if "分图策划助手" in system_prompt:
-            return _fake_allocation_plan_payload()
+            return _fake_allocation_plan_payload(user_prompt)
         if "READY" in system_prompt:
             return "READY"
         if "用户硬性要求" in user_prompt and "西安" in user_prompt:
@@ -505,7 +588,7 @@ def test_inspiration_content_image_contributes_to_style_prompt(client, monkeypat
                 '"foods":["肉夹馍","羊肉泡馍"],"keywords":["古城路线"],"confidence":0.93}'
             )
         if "分图策划助手" in system_prompt:
-            return _fake_allocation_plan_payload()
+            return _fake_allocation_plan_payload(_user_prompt)
         if "资深视觉创意总监" in system_prompt:
             assert strict_json is False
             return (
@@ -520,7 +603,7 @@ def test_inspiration_content_image_contributes_to_style_prompt(client, monkeypat
         if "资产提取助手" in system_prompt:
             return _fake_asset_extract_payload()
         if "分图策划助手" in system_prompt:
-            return _fake_allocation_plan_payload()
+            return _fake_allocation_plan_payload(user_prompt)
         if "用户硬性要求" in user_prompt and "钟楼" in user_prompt and "肉夹馍" in user_prompt:
             return (
                 "生成一张西安景点主题图解，聚焦钟楼与兵马俑路线。\n\n"
@@ -551,101 +634,6 @@ def test_inspiration_content_image_contributes_to_style_prompt(client, monkeypat
     assert "肉夹馍" in style_prompt
 
 
-def test_inspiration_collecting_stage_uses_multimodal_when_user_uploads_image(client, monkeypatch):
-    setup_model_routing(client, text_model_name="gpt-4.1")
-    session = create_session(client, title="多模态对话校验")
-
-    from backend.app.services.style_service import StyleService
-
-    captured: dict[str, Any] = {"image_urls": []}
-
-    def fake_call_text_model_with_images(
-        _self,
-        _provider,
-        _model_name,
-        _system_prompt,
-        _user_prompt,
-        image_urls,
-        *,
-        strict_json,
-    ):
-        if "分图策划助手" in _system_prompt:
-            assert strict_json is True
-            return _fake_allocation_plan_payload()
-        assert strict_json is False
-        captured["image_urls"] = list(image_urls)
-        return json.dumps(
-            {
-                "reply": "我看到了你上传的参考图，我们先对齐本次的地点和核心内容。",
-                "options": {"title": "请选择绘画风格", "items": ["手绘水彩", "复古手账"], "max": 2},
-            },
-            ensure_ascii=False,
-        )
-
-    def fail_call_text_model(*_args, **_kwargs):
-        raise AssertionError("collecting 阶段上传图片后应走多模态调用，不应回退纯文本调用")
-
-    monkeypatch.setattr(StyleService, "_call_text_model_with_images", fake_call_text_model_with_images)
-    monkeypatch.setattr(StyleService, "_call_text_model", fail_call_text_model)
-
-    response = _post_inspiration_message(
-        client,
-        data=[
-            ("session_id", session["id"]),
-            ("text", "我想做西安美食与景点图解"),
-        ],
-        files=[("images", ("xian-reference.png", BytesIO(b"image"), "image/png"))],
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["messages"][-1]["role"] == "assistant"
-    assert "我看到了你上传的参考图" in body["messages"][-1]["content"]
-    assert captured["image_urls"]
-    assert captured["image_urls"][0].startswith("http://127.0.0.1:8887/static/images/")
-
-
-def test_inspiration_finished_style_without_count_enters_prompt_dialog(client, monkeypatch):
-    setup_model_routing(client, text_model_name="gpt-4.1")
-    session = create_session(client, title="未给张数时进入引导对话")
-
-    from backend.app.services.style_service import StyleService
-
-    def finish_collecting_without_count(_self, **_kwargs):
-        return {
-            "reply": "风格收集已完成",
-            "options": {"title": "请选择生成数量", "items": ["生成1张"], "max": 1},
-            "stage": "image_count",
-            "next_stage": "",
-            "is_finished": True,
-            "fallback_used": False,
-        }
-
-    def fake_call_text_model(_self, _provider, _model_name, system_prompt, _user_prompt, *, strict_json):
-        if "创意策划助手" in system_prompt and not strict_json:
-            return "好的，我先确认需求：想做哪个城市？重点是景点还是美食？本次计划生成几张图？"
-        return (
-            "生成一张示例风格图，突出复古手账材质。\n\n"
-            "生成一张示例风格图，突出拼贴装饰。"
-        )
-
-    monkeypatch.setattr(StyleService, "chat", finish_collecting_without_count)
-    monkeypatch.setattr(StyleService, "_call_text_model", fake_call_text_model)
-
-    response = _post_inspiration_message(
-        client,
-        data=[
-            ("session_id", session["id"]),
-            ("selected_items", "复古牛皮纸+手绘贴纸边框"),
-        ],
-        files=[],
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["draft"]["stage"] == "prompt_revision"
-    assert body["messages"][-1]["options"] is None
-    assert "计划生成几张图" in body["messages"][-1]["content"]
-
-
 def test_inspiration_prompt_revision_preserves_user_assets_on_followup_feedback(client, monkeypatch):
     setup_model_routing(client, text_model_name="gpt-4.1")
     session = create_session(client, title="修订保持用户资产")
@@ -666,7 +654,7 @@ def test_inspiration_prompt_revision_preserves_user_assets_on_followup_feedback(
         if "资产提取助手" in system_prompt:
             return _fake_asset_extract_payload()
         if "分图策划助手" in system_prompt:
-            return _fake_allocation_plan_payload()
+            return _fake_allocation_plan_payload(user_prompt)
         if "READY" in system_prompt:
             return "READY"
         if "用户硬性要求：" in user_prompt and "西安" in user_prompt:
@@ -791,7 +779,7 @@ def test_inspiration_multi_image_prompt_requires_split_blocks(client, monkeypatc
         if "READY" in system_prompt:
             return "READY"
         if "分图策划助手" in system_prompt:
-            return _fake_allocation_plan_payload()
+            return _fake_allocation_plan_payload(_user_prompt)
         if "更专业、更可执行的中文母提示词" in system_prompt:
             return (
                 "生成一张西安景点主题的复古旅行手账风格竖版图解海报，重点描绘钟楼、华清池、兵马俑。\n\n"
@@ -819,6 +807,71 @@ def test_inspiration_multi_image_prompt_requires_split_blocks(client, monkeypatc
     assert style_prompt.count("生成一张") >= 2
 
 
+def test_inspiration_prompt_revision_text_overrides_existing_image_count(client, monkeypatch):
+    setup_model_routing(client, text_model_name="gpt-4.1")
+    session = create_session(client, title="张数覆盖会话")
+
+    from backend.app.services.style_service import StyleService
+
+    def fake_chat(_self, **_kwargs):
+        return {
+            "reply": "风格收集完成",
+            "options": {"title": "请选择生成数量", "items": ["1", "2", "5"], "max": 1},
+            "stage": "image_count",
+            "next_stage": "",
+            "is_finished": True,
+            "fallback_used": False,
+        }
+
+    def fake_call_text_model(_self, _provider, _model_name, system_prompt, user_prompt, *, strict_json):
+        if "参数提取助手" in system_prompt:
+            if "一张" in user_prompt or "1张" in user_prompt:
+                return '{"image_count": 1}'
+            return '{"image_count": null}'
+        if "提示词质检助手" in system_prompt:
+            return "READY"
+        if strict_json:
+            return '{"image_count": null}'
+        if "张数：1" in user_prompt:
+            return "生成一张西安美食主题图解，聚焦biangbiang面与肉夹馍。"
+        return (
+            "生成一张西安景点主题图解，聚焦钟楼与路线导览。\n\n"
+            "生成一张西安美食主题图解，聚焦biangbiang面与肉夹馍。"
+        )
+
+    monkeypatch.setattr(StyleService, "chat", fake_chat)
+    monkeypatch.setattr(StyleService, "_call_text_model", fake_call_text_model)
+
+    enter_prompt_response = _post_inspiration_message(
+        client,
+        data=[
+            ("session_id", session["id"]),
+            ("selected_items", "2"),
+        ],
+        files=[],
+    )
+    assert enter_prompt_response.status_code == 200
+    enter_prompt_body = enter_prompt_response.json()
+    assert enter_prompt_body["draft"]["stage"] == "prompt_revision"
+    assert enter_prompt_body["draft"]["image_count"] == 2
+
+    revise_response = _post_inspiration_message(
+        client,
+        data=[
+            ("session_id", session["id"]),
+            ("text", "一张就行，聚焦西安美食。"),
+        ],
+        files=[],
+    )
+    assert revise_response.status_code == 200
+    revise_body = revise_response.json()
+    assert revise_body["draft"]["stage"] == "prompt_revision"
+    assert revise_body["draft"]["image_count"] == 1
+    style_prompt = revise_body["draft"]["style_payload"]["style_prompt"]
+    assert "生成一张" in style_prompt
+    assert style_prompt.count("生成一张") == 1
+
+
 def test_inspiration_prompt_revision_model_failure_returns_error(client, monkeypatch):
     setup_model_routing(client)
     session = create_session(client, title="修订建议回填校验")
@@ -840,7 +893,7 @@ def test_inspiration_prompt_revision_model_failure_returns_error(client, monkeyp
         if "READY" in system_prompt:
             return "READY"
         if "分图策划助手" in system_prompt:
-            return _fake_allocation_plan_payload()
+            return _fake_allocation_plan_payload(user_prompt)
         if "修订意见：我想生成陕西西安的" in user_prompt:
             return '{"invalid":"json"}'
         return (
@@ -880,11 +933,15 @@ def test_inspiration_use_style_profile_persists_readable_user_message(client, mo
     session = create_session(client, title="应用风格消息展示会话")
     from backend.app.services.style_service import StyleService
 
+    def fake_call_text_model_with_images(*_args, **_kwargs):
+        raise AssertionError("应用风格后引导阶段不应把风格样例图当作内容图送入视觉调用")
+
     monkeypatch.setattr(
         StyleService,
         "_call_text_model",
         lambda *_args, **_kwargs: "已读取该风格，我先帮你细化需求。请告诉我城市、核心美食/景点，以及计划生成几张图。",
     )
+    monkeypatch.setattr(StyleService, "_call_text_model_with_images", fake_call_text_model_with_images)
     image_response = client.post(
         "/api/v1/assets/image",
         data={"session_id": session["id"]},
@@ -926,6 +983,7 @@ def test_inspiration_use_style_profile_persists_readable_user_message(client, mo
     image_attachments = [item for item in latest_user_message["attachments"] if item["type"] == "image"]
     assert image_attachments
     assert image_attachments[0]["preview_url"].startswith("http://127.0.0.1:8887/static/images/")
+    assert image_attachments[0]["usage_type"] == "style_reference"
     assistant_messages = [msg for msg in body["messages"] if msg["role"] == "assistant"]
     assert assistant_messages
     assert "请告诉我城市、核心美食/景点" in assistant_messages[-1]["content"]

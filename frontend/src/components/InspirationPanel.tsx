@@ -129,6 +129,7 @@ export default function InspirationPanel() {
   const [previewLoadFailed, setPreviewLoadFailed] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputTextRef = useRef<HTMLTextAreaElement>(null);
   const sessionIdRef = useRef<string | null>(activeSessionId);
   const pendingFilesRef = useRef<PendingUploadFile[]>([]);
 
@@ -203,6 +204,13 @@ export default function InspirationPanel() {
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, isLoading, draft]);
+
+  useEffect(() => {
+    const element = inputTextRef.current;
+    if (!element) return;
+    element.style.height = 'auto';
+    element.style.height = `${Math.min(element.scrollHeight, 180)}px`;
+  }, [inputText]);
 
   const latestCandidateBlock = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -699,15 +707,32 @@ export default function InspirationPanel() {
                 <button className="btn btn-secondary" style={{ padding: '8px' }} title="添加附件" disabled={isLoading || !!draft?.locked} onClick={() => fileInputRef.current?.click()}>
                   <Paperclip size={18} />
                 </button>
-                <input
-                  type="text"
+                <textarea
+                  ref={inputTextRef}
                   className="input"
-                  placeholder={draft?.locked ? '方案已锁定，可直接在右侧生成。' : '输入描述，支持同时上传文本、图片、视频。'}
+                  placeholder={draft?.locked ? '方案已锁定，可直接在右侧生成。' : '输入描述，支持同时上传文本、图片、视频（Enter发送，Shift/Ctrl+Enter换行）。'}
                   value={inputText}
                   disabled={isLoading || !!draft?.locked}
                   onChange={(event) => setInputText(event.target.value)}
+                  rows={1}
+                  style={{
+                    minHeight: '42px',
+                    maxHeight: '180px',
+                    resize: 'none',
+                    overflowY: 'auto',
+                    lineHeight: 1.5,
+                  }}
                   onKeyDown={(event) => {
-                    if (event.key === 'Enter') handleSend();
+                    if (
+                      event.key === 'Enter'
+                      && !event.shiftKey
+                      && !event.ctrlKey
+                      && !event.metaKey
+                      && !event.altKey
+                    ) {
+                      event.preventDefault();
+                      handleSend();
+                    }
                   }}
                 />
                 <button className="btn btn-primary" disabled={(!inputText.trim() && pendingFiles.length === 0) || isLoading || !!draft?.locked} onClick={() => handleSend()}>

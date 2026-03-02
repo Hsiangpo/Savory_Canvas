@@ -1,6 +1,16 @@
 # Savory Canvas
 
-Savory Canvas 是一个“灵感对话 -> 风格锁定 -> 多图生成 -> 文案导出”的全栈应用。
+Savory Canvas 是一个“灵感对话 -> 风格确认 -> 多图生成 -> 图文文案 -> PDF 导出”的本地图文创作工具。
+
+## 最新同步状态（2026-03-03）
+
+- 灵感对话主流程：`style_collecting -> prompt_revision -> asset_confirming -> locked`
+- 生成任务阶段：`asset_extract -> asset_allocate -> prompt_generate -> image_generate -> copy_generate -> finalize`
+- 模型路由能力校验：
+  - 图片模型必须包含 `image_generation`
+  - 文本模型必须包含 `text_generation`
+- `/api/v1/models` 已做上游失败重试与本地缓存兜底，降低上游波动导致的“暂无可用模型”概率
+- 风格模板、样例图、会话与任务数据均持久化在本地 SQLite
 
 ## 技术栈
 
@@ -9,15 +19,13 @@ Savory Canvas 是一个“灵感对话 -> 风格锁定 -> 多图生成 -> 文案
 
 ## 目录结构
 
-- `backend/`：后端 API、服务、仓储、测试
-- `frontend/`：前端页面与状态管理
-- `docs/`：PRD、OpenAPI、计划文档
+- `backend/`：后端 API、服务、仓储、任务执行、测试
+- `frontend/`：前端页面、状态管理、接口调用
+- `docs/`：PRD、OpenAPI、开发说明、迭代计划
 
 ## 本地启动
 
-### 1) 启动后端
-
-在仓库根目录执行：
+### 1) 启动后端（仓库根目录）
 
 ```bash
 python -m uvicorn backend.app.main:app --app-dir . --host 127.0.0.1 --port 8887 --reload
@@ -33,39 +41,36 @@ npm install
 npm run dev
 ```
 
-默认前端地址：`http://localhost:7778`
+前端默认地址：`http://localhost:7778`  
+后端默认地址：`http://127.0.0.1:8887`
 
-## 测试与构建
+## 测试与门禁
 
-### 后端测试
+### 后端
 
 ```bash
+cd backend
 pytest -q
 ```
 
-### 前端检查
+### 前端
 
 ```bash
 cd frontend
-npm run lint
-npm run build
+npm run lint && npm run build
 ```
 
 ## API 契约
 
-唯一契约基准：`docs/OPENAPI.JSON`
+唯一契约基准：`docs/OPENAPI.JSON`。  
+后端字段变更必须先更新该文件，再改代码。
 
 ## 常见问题
 
-### CORS 报错
+### 1) 浏览器提示 CORS
 
-如果浏览器提示 `No 'Access-Control-Allow-Origin' header`，先确认：
+优先检查后端日志是否有 500。后端内部报错时，浏览器可能表现为 CORS。
 
-1. 后端是否按上面的命令启动成功。
-2. 前端请求地址是否是 `http://127.0.0.1:8887/api/v1`。
-3. 后端日志里是否出现 500（500 也会让浏览器表现为 CORS 错误）。
+### 2) 模型列表偶发空
 
-## 当前状态
-
-- 前端：`npm run lint && npm run build` 通过
-- 后端：`pytest -q` 通过
+通常是上游 `/models` 接口临时失败或超时。当前后端已做重试与缓存恢复，仍需保证上游提供商稳定可用。

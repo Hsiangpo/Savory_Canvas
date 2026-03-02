@@ -33,30 +33,47 @@ export default function ModelPanel({ onClose }: ModelPanelProps) {
     try {
       const res = await api.getModels(providerId);
       return res.items.filter(m => m.capabilities.includes(capability));
-    } catch {
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } };
+      const msg = e?.response?.data?.message || '模型列表拉取失败';
+      addToast(msg, 'error');
       return [];
     }
   };
 
   const handleTextProviderChange = async (providerId: string) => {
+    const prevModel = textModelInput;
+    const prevModels = textModels;
     setTextProviderId(providerId);
     setTextModels([]);
     setTextModelInput('');
     setIsFetchingTextModels(true);
     const models = await fetchModelsSafe(providerId, 'text_generation');
-    setTextModels(models);
-    setTextModelInput(models.length > 0 ? models[0].name : '');
+    if (models.length > 0) {
+      setTextModels(models);
+      setTextModelInput(models[0].name);
+    } else {
+      setTextModels(prevModels);
+      setTextModelInput(prevModel);
+    }
     setIsFetchingTextModels(false);
   };
 
   const handleImageProviderChange = async (providerId: string) => {
+    const prevModel = imageModelInput;
+    const prevModels = imageModels;
     setImageProviderId(providerId);
     setImageModels([]);
     setImageModelInput('');
     setIsFetchingImageModels(true);
     const models = await fetchModelsSafe(providerId, 'image_generation');
-    setImageModels(models);
-    setImageModelInput(models.length > 0 ? models[0].name : '');
+    if (models.length > 0) {
+      setImageModels(models);
+      setImageModelInput(models[0].name);
+    } else {
+      setImageModels(prevModels);
+      setImageModelInput(prevModel);
+    }
     setIsFetchingImageModels(false);
   };
 
@@ -90,22 +107,26 @@ export default function ModelPanel({ onClose }: ModelPanelProps) {
       if (initialTextProviderId) {
         setIsFetchingTextModels(true);
         const models = await fetchModelsSafe(initialTextProviderId, 'text_generation');
-        setTextModels(models);
-        if (models.length > 0 && !models.some(m => m.name === initialTextModel)) {
-          initialTextModel = models[0].name;
-        } else if (models.length === 0) {
-          initialTextModel = '';
+        if (models.length > 0) {
+          setTextModels(models);
+          if (!models.some(m => m.name === initialTextModel)) {
+            initialTextModel = models[0].name;
+          }
+        } else if (initialTextModel) {
+          setTextModels([{ id: initialTextModel, name: initialTextModel, capabilities: ['text_generation'] }]);
         }
         setIsFetchingTextModels(false);
       }
       if (initialImageProviderId) {
         setIsFetchingImageModels(true);
         const models = await fetchModelsSafe(initialImageProviderId, 'image_generation');
-        setImageModels(models);
-        if (models.length > 0 && !models.some(m => m.name === initialImageModel)) {
-          initialImageModel = models[0].name;
-        } else if (models.length === 0) {
-          initialImageModel = '';
+        if (models.length > 0) {
+          setImageModels(models);
+          if (!models.some(m => m.name === initialImageModel)) {
+            initialImageModel = models[0].name;
+          }
+        } else if (initialImageModel) {
+          setImageModels([{ id: initialImageModel, name: initialImageModel, capabilities: ['image_generation'] }]);
         }
         setIsFetchingImageModels(false);
       }

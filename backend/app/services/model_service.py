@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 from urllib import error as url_error
@@ -11,11 +12,14 @@ from backend.app.core.utils import now_iso
 from backend.app.repositories.config_repo import ConfigRepository
 from backend.app.repositories.provider_repo import ProviderRepository
 
+logger = logging.getLogger(__name__)
+
 
 class ModelService:
     def __init__(self, config_repo: ConfigRepository, provider_repo: ProviderRepository):
         self.config_repo = config_repo
         self.provider_repo = provider_repo
+        self._provider_model_cache: dict[str, list[dict[str, Any]]] = {}
 
     def list_models(self, provider_id: str) -> dict[str, Any]:
         provider = self.provider_repo.get(provider_id)
@@ -78,22 +82,42 @@ class ModelService:
             method="GET",
             headers=request_headers,
         )
+        last_error: DomainError | None = None
+        for _ in range(3):
+            try:
+                with request.urlopen(upstream_request, timeout=10) as response:
+                    body_text = response.read().decode("utf-8")
+            except (url_error.URLError, TimeoutError, OSError) as exc:
+                last_error = DomainError(code="E-1006", message="上游模型列表获取失败", status_code=400)
+                continue
 
-        try:
-            with request.urlopen(upstream_request, timeout=10) as response:
-                body_text = response.read().decode("utf-8")
-        except (url_error.URLError, TimeoutError, OSError) as exc:
-            raise DomainError(code="E-1006", message="上游模型列表获取失败", status_code=400) from exc
+            try:
+                payload = json.loads(body_text)
+            except json.JSONDecodeError:
+                last_error = DomainError(code="E-1006", message="上游模型列表响应格式错误", status_code=400)
+                continue
 
-        try:
-            payload = json.loads(body_text)
-        except json.JSONDecodeError as exc:
-            raise DomainError(code="E-1006", message="上游模型列表响应格式错误", status_code=400) from exc
+            data_items = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data_items, list):
+                last_error = DomainError(code="E-1006", message="上游模型列表响应格式错误", status_code=400)
+                continue
 
-        data_items = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data_items, list):
-            raise DomainError(code="E-1006", message="上游模型列表响应格式错误", status_code=400)
+            models = self._normalize_model_items(data_items)
+            if not models:
+                last_error = DomainError(code="E-1006", message="上游未返回可用模型", status_code=400)
+                continue
+            provider_id = str(provider.get("id") or "").strip()
+            if provider_id:
+                self._provider_model_cache[provider_id] = models
+            return models
 
+        provider_id = str(provider.get("id") or "").strip()
+        if provider_id and provider_id in self._provider_model_cache:
+            logger.warning("上游模型列表拉取失败，使用缓存模型: provider_id=%s", provider_id)
+            return self._provider_model_cache[provider_id]
+        raise last_error or DomainError(code="E-1006", message="上游模型列表获取失败", status_code=400)
+
+    def _normalize_model_items(self, data_items: list[Any]) -> list[dict[str, Any]]:
         models: list[dict[str, Any]] = []
         seen_names: set[str] = set()
         for item in data_items:
@@ -117,9 +141,6 @@ class ModelService:
                     "capabilities": capabilities,
                 }
             )
-
-        if not models:
-            raise DomainError(code="E-1006", message="上游未返回可用模型", status_code=400)
         return models
 
     def _find_model(self, models: list[dict[str, Any]], model_name: str) -> dict[str, Any] | None:

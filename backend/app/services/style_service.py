@@ -464,10 +464,17 @@ class StyleService(StylePayloadMixin):
         return candidates
 
     def _should_retry_model_name(self, error: StyleFallbackError | None) -> bool:
-        if not error or error.reason != "upstream_http_error":
+        if not error:
             return False
         detail = str(error.detail or "").lower()
-        return "thinking budget" in detail and "thinking level" in detail
+        if error.reason == "upstream_http_error":
+            return "thinking budget" in detail and "thinking level" in detail
+        # 部分网关在 thinking 变体上会直接断开连接，允许降级到基础模型名重试。
+        if error.reason == "upstream_timeout_or_network":
+            return True
+        if error.reason == "protocol_both_failed" and "upstream_timeout_or_network" in detail:
+            return True
+        return "remote end closed connection without response" in detail
 
     def _to_data_url_if_local(self, source: str) -> str | None:
         local_path = self._resolve_local_image_path(source)

@@ -95,14 +95,19 @@ h6 {
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border-color);
-  border-radius: 4px;
+  background: rgba(255, 126, 95, 0.45);
+  border-radius: 8px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+  background: rgba(255, 126, 95, 0.68);
+}
+
+* {
+  scrollbar-color: rgba(255, 126, 95, 0.45) rgba(255, 255, 255, 0.04);
 }
 
 /* Shared Panel Styles */
@@ -166,7 +171,7 @@ h6 {
 }
 
 .layout-right {
-  flex: 0 0 480px;
+  flex: 0 0 560px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -177,14 +182,50 @@ h6 {
 .right-panel-progress {
   padding: 16px;
   flex: 0 0 auto;
-  max-height: 40vh;
+  max-height: 32vh;
   overflow-y: auto;
 }
 
 .right-panel-result {
   flex: 1 1 0;
-  min-height: 300px;
+  min-height: 460px;
   overflow: hidden;
+}
+
+.result-panel-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow-y: scroll;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+.result-panel-content {
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow: visible;
+  gap: 8px;
+}
+
+.result-panel-shell::-webkit-scrollbar {
+  width: 10px;
+}
+
+.result-panel-shell::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+}
+
+.result-panel-shell::-webkit-scrollbar-thumb {
+  background: rgba(255, 126, 95, 0.45);
+  border-radius: 8px;
+}
+
+.result-panel-shell::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 126, 95, 0.68);
 }
 
 .right-panel-export {
@@ -294,8 +335,15 @@ h6 {
 }
 
 .copy-section-body-scrollable {
-  max-height: 460px;
-  overflow-y: auto;
+  min-height: 220px;
+  max-height: clamp(220px, 40vh, 520px);
+  overflow-y: scroll;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+
+.image-section-body {
+  padding-top: 12px;
 }
 
 .copy-block {
@@ -340,10 +388,13 @@ h6 {
 /* Responsive: narrow screens */
 @media (max-width: 1200px) {
   .layout-right {
-    flex: 0 0 380px;
+    flex: 0 0 420px;
   }
   .right-panel-progress {
-    max-height: 35vh;
+    max-height: 30vh;
+  }
+  .right-panel-result {
+    min-height: 400px;
   }
 }
 

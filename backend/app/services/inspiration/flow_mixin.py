@@ -740,7 +740,8 @@ class InspirationFlowMixin(InspirationRequirementMixin, InspirationStyleSaveMixi
     ) -> str:
         provider, model_name = self.style_service._resolve_text_model_provider()
         last_error: StyleFallbackError | None = None
-        for attempt in range(2):
+        max_attempts = 3
+        for attempt in range(max_attempts):
             try:
                 return self.style_service._call_text_model_with_images(
                     provider,
@@ -761,7 +762,7 @@ class InspirationFlowMixin(InspirationRequirementMixin, InspirationStyleSaveMixi
                     error.detail,
                     retryable,
                 )
-                if attempt == 1 or not retryable:
+                if attempt == max_attempts - 1 or not retryable:
                     break
         raise DomainError(
             code="E-1004",

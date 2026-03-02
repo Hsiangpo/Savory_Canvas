@@ -125,19 +125,14 @@ export default function ResultPanel() {
   }, [previewModal]);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div className="result-panel-shell">
       <div className="panel-header">
         <h2 className="panel-title">
           <ImageIcon size={20} color="var(--accent-color)" /> 生成结果预览
         </h2>
-        {isSuccess && (
-          <button className="btn btn-secondary btn-icon" title="一键复制文案" onClick={copyToClipboard}>
-            <Copy size={16} />
-          </button>
-        )}
       </div>
 
-      <div className="panel-content" ref={contentRef}>
+      <div className="panel-content result-panel-content" ref={contentRef}>
         {!isRunning && !isSuccess && (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
             暂无结果，请调整配置后点击生成
@@ -179,7 +174,7 @@ export default function ResultPanel() {
             )}
 
             {latestAssetBreakdown && (
-              <div className="asset-breakdown" style={{ marginBottom: '16px', padding: '14px', backgroundColor: 'var(--bg-glass-hover)', borderRadius: '8px' }}>
+              <div className="asset-breakdown" style={{ padding: '14px', backgroundColor: 'var(--bg-glass-hover)', borderRadius: '8px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', color: 'var(--text-primary)' }}>
                    <Component size={16} color="var(--accent-color)" />
                    <h3 style={{ margin: 0, fontSize: '1rem' }}>素材拆解结果</h3>
@@ -223,12 +218,17 @@ export default function ResultPanel() {
               </div>
             )}
 
-            <div className="copy-section" style={{ marginBottom: '16px' }}>
+            <div className="copy-section">
               <div className="copy-section-header-static">
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <FileText size={16} color="var(--accent-color)" />
                   <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-primary)' }}>图文文案</h3>
                 </div>
+                {isSuccess && (
+                  <button className="btn btn-secondary btn-icon" title="一键复制文案" onClick={copyToClipboard}>
+                    <Copy size={16} />
+                  </button>
+                )}
               </div>
 
               <div className="copy-section-body copy-section-body-scrollable">
@@ -260,6 +260,17 @@ export default function ResultPanel() {
                   </div>
                 )}
 
+                {hasCopy
+                  && !latestResult.copy?.intro
+                  && !hasSections
+                  && !latestResult.copy?.ending
+                  && latestResult.copy?.full_text && (
+                    <div className="copy-block">
+                      <span className="copy-label">正文</span>
+                      <p className="copy-paragraph">{latestResult.copy.full_text}</p>
+                    </div>
+                  )}
+
                 {!hasCopy && (
                   <div style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
                     {copyFailureReason ? (
@@ -276,17 +287,27 @@ export default function ResultPanel() {
               </div>
             </div>
 
-            <div className="result-grid" style={{ marginBottom: '16px' }}>
-              {latestResult.images?.map((img, i) => (
-                <ResultImage
-                  key={`${img.image_url}-${img.image_index ?? i}`}
-                  img={img}
-                  onPreview={(url, title) => {
-                    setPreviewLoadFailed(false);
-                    setPreviewModal({ url, title });
-                  }}
-                />
-              ))}
+            <div className="copy-section">
+              <div className="copy-section-header-static">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <ImageIcon size={16} color="var(--accent-color)" />
+                  <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-primary)' }}>生成图片</h3>
+                </div>
+              </div>
+              <div className="copy-section-body image-section-body">
+                <div className="result-grid">
+                  {latestResult.images?.map((img, i) => (
+                    <ResultImage
+                      key={`${img.image_url}-${img.image_index ?? i}`}
+                      img={img}
+                      onPreview={(url, title) => {
+                        setPreviewLoadFailed(false);
+                        setPreviewModal({ url, title });
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
             </div>
           </>
         )}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib import error as url_error
 
 from conftest import (
     create_generation_job,
@@ -342,6 +343,46 @@ def test_fetch_provider_models_keeps_plain_text_model_out_of_image_generation(mo
     assert models[0]["name"] == "gpt-3.5-turbo"
     assert "text_generation" in models[0]["capabilities"]
     assert "image_generation" not in models[0]["capabilities"]
+
+
+def test_fetch_provider_models_uses_cache_when_upstream_temporarily_unavailable(monkeypatch):
+    from backend.app.services.model_service import ModelService
+
+    service = ModelService(config_repo=None, provider_repo=None)  # type: ignore[arg-type]
+    provider = {
+        "id": "provider-cache-demo",
+        "base_url": "https://example.com",
+        "api_key": "provider-secret",
+    }
+    call_count = 0
+
+    class FakeResponse:
+        def __init__(self, payload_text: str):
+            self._payload_text = payload_text
+
+        def read(self):
+            return self._payload_text.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(_request, timeout):
+        nonlocal call_count
+        assert timeout == 10
+        call_count += 1
+        if call_count == 1:
+            payload = {"data": [{"id": "gpt-5.1"}]}
+            return FakeResponse(json.dumps(payload))
+        raise url_error.URLError("Temporary network error")
+
+    monkeypatch.setattr("backend.app.services.model_service.request.urlopen", fake_urlopen)
+    first_models = service.fetch_provider_models(provider)
+    assert first_models[0]["name"] == "gpt-5.1"
+    second_models = service.fetch_provider_models(provider)
+    assert second_models[0]["name"] == "gpt-5.1"
 
 
 def test_export_task_flow(client):

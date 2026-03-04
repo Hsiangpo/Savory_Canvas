@@ -1,0 +1,1 @@
+mock image for prompt: 第2张，素材：红烧肉场景，风格：{'painting_style': ['油画']}

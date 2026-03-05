@@ -56,6 +56,13 @@ function isPromptActionOption(option: string): boolean {
   return text.includes('继续优化') || text.includes('确定使用') || text.includes('确认提示词');
 }
 
+function getStageLabel(stage: api.InspirationDraft['stage'] | undefined): string {
+  if (stage === 'prompt_revision') return '张数与提示词确认';
+  if (stage === 'asset_confirming') return '分图确认';
+  if (stage === 'locked') return '锁定生成';
+  return '风格确认';
+}
+
 function shouldRenderInlineOptions(message: api.InspirationMessage): boolean {
   const items = message.options?.items || [];
   if (!items.length) return false;
@@ -118,6 +125,7 @@ function ChatImageAttachmentCard(
 export default function InspirationPanel() {
   const { activeSessionId, addToast, draft, setDraft } = useAppStore();
   const [messages, setMessages] = useState<api.InspirationMessage[]>([]);
+  const [agentMeta, setAgentMeta] = useState<api.InspirationAgentMeta | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [inputText, setInputText] = useState('');
   const [pendingFiles, setPendingFiles] = useState<PendingUploadFile[]>([]);
@@ -132,6 +140,7 @@ export default function InspirationPanel() {
   const inputTextRef = useRef<HTMLTextAreaElement>(null);
   const sessionIdRef = useRef<string | null>(activeSessionId);
   const pendingFilesRef = useRef<PendingUploadFile[]>([]);
+  const lastMessageCountRef = useRef(0);
 
   const revokePreviewUrls = useCallback((items: PendingUploadFile[]) => {
     items.forEach((item) => {
@@ -156,9 +165,11 @@ export default function InspirationPanel() {
       if (sessionIdRef.current !== sessionId) return;
       setMessages(response.messages || []);
       setDraft(response.draft || null);
+      setAgentMeta(response.agent || null);
     } catch {
       if (sessionIdRef.current !== sessionId) return;
       setMessages([{ id: Date.now().toString(), role: 'system', content: '连接失败，请稍后重试。', created_at: new Date().toISOString() }]);
+      setAgentMeta(null);
     } finally {
       if (sessionIdRef.current === sessionId) setIsLoading(false);
     }
@@ -188,6 +199,7 @@ export default function InspirationPanel() {
     setIsLoading(false);
     setMessages([]);
     setDraft(null);
+    setAgentMeta(null);
     setCurrentSelection([]);
     setPendingFiles((previous) => {
       revokePreviewUrls(previous);
@@ -202,8 +214,18 @@ export default function InspirationPanel() {
   }, [activeSessionId, closeImagePreview, fetchConversation, revokePreviewUrls, setDraft]);
 
   useEffect(() => {
-    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-  }, [messages, isLoading, draft]);
+    const container = chatRef.current;
+    if (!container) return;
+    const previousCount = lastMessageCountRef.current;
+    const nextCount = messages.length;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const shouldStickToBottom = previousCount === 0 || distanceFromBottom < 80;
+    lastMessageCountRef.current = nextCount;
+    if (nextCount > previousCount && shouldStickToBottom) {
+      // 修复点：仅在新增消息且用户接近底部时自动滚动，避免阅读历史内容时被强制打断。
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [messages]);
 
   useEffect(() => {
     const element = inputTextRef.current;
@@ -404,6 +426,7 @@ export default function InspirationPanel() {
       if (sessionIdRef.current !== requestSessionId) return;
       setMessages(response.messages || []);
       setDraft(response.draft || null);
+      setAgentMeta(response.agent || null);
     } catch (error) {
       if (sessionIdRef.current !== requestSessionId) return;
       const typedError = error as { response?: { data?: { code?: string; message?: string } } };
@@ -463,14 +486,53 @@ export default function InspirationPanel() {
       </div>
 
       {activeSessionId && draft?.stage && (
-        <div style={{ display: 'flex', gap: '10px', padding: '10px 20px', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-glass)', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-          <div style={{ color: draft.stage === 'style_collecting' ? 'var(--accent-color)' : 'var(--text-secondary)' }}>1. 风格确认</div>
-          <div>&gt;</div>
-          <div style={{ color: draft.stage === 'prompt_revision' ? 'var(--accent-color)' : ['asset_confirming', 'locked'].includes(draft.stage) ? 'var(--text-secondary)' : 'var(--text-muted)' }}>2. 张数与提示词确认</div>
-          <div>&gt;</div>
-          <div style={{ color: draft.stage === 'asset_confirming' ? 'var(--accent-color)' : draft.stage === 'locked' ? 'var(--text-secondary)' : 'var(--text-muted)' }}>3. 分图确认</div>
-          <div>&gt;</div>
-          <div style={{ color: draft.stage === 'locked' ? 'var(--accent-color)' : 'var(--text-muted)' }}>4. 锁定生成</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px 20px', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-glass)', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+          {agentMeta?.mode === 'langgraph' ? (
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ color: 'var(--accent-color)', fontWeight: 600 }}>
+                当前 Agent 阶段：{agentMeta.dynamic_stage_label || getStageLabel(draft.stage)}
+              </div>
+              {agentMeta.dynamic_stage && (
+                <div style={{ color: 'var(--text-secondary)' }}>
+                  ({agentMeta.dynamic_stage})
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <div style={{ color: draft.stage === 'style_collecting' ? 'var(--accent-color)' : 'var(--text-secondary)' }}>1. 风格确认</div>
+              <div>&gt;</div>
+              <div style={{ color: draft.stage === 'prompt_revision' ? 'var(--accent-color)' : ['asset_confirming', 'locked'].includes(draft.stage) ? 'var(--text-secondary)' : 'var(--text-muted)' }}>2. 张数与提示词确认</div>
+              <div>&gt;</div>
+              <div style={{ color: draft.stage === 'asset_confirming' ? 'var(--accent-color)' : draft.stage === 'locked' ? 'var(--text-secondary)' : 'var(--text-muted)' }}>3. 分图确认</div>
+              <div>&gt;</div>
+              <div style={{ color: draft.stage === 'locked' ? 'var(--accent-color)' : 'var(--text-muted)' }}>4. 锁定生成</div>
+            </div>
+          )}
+          {agentMeta?.trace?.length ? (
+            <details style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+              <summary style={{ cursor: 'pointer' }}>查看 Agent 工具链</summary>
+              <div style={{ marginTop: '8px', display: 'grid', gap: '6px' }}>
+                {agentMeta.trace.map((item) => (
+                  <div
+                    key={item.id}
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border-color)',
+                      background: 'rgba(255,255,255,0.03)',
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                      {item.node}
+                      {item.tool_name ? ` · ${item.tool_name}` : ''}
+                    </div>
+                    <div>{item.summary || item.decision || '无附加说明'}</div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : null}
         </div>
       )}
 

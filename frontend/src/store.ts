@@ -152,7 +152,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const data = await api.getSessions();
       set({ sessionList: data.items || [] });
       if (data.items?.length > 0 && !get().activeSessionId) {
-        set({ activeSessionId: data.items[0].id });
+        await get().setActiveSessionId(data.items[0].id);
       }
     } catch (e) {
       console.error(e);
@@ -162,15 +162,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   createSession: async (title, content_mode) => {
     try {
       const newSession = await api.createSession({ title, content_mode });
-      set((state) => ({ 
-        sessionList: [newSession, ...state.sessionList],
-        activeSessionId: newSession.id,
-        latestJob: null,
-        latestResult: null,
-        latestStages: [],
-        latestAssetBreakdown: null,
-        draft: null
+      set((state) => ({
+        sessionList: [newSession, ...state.sessionList]
       }));
+      await get().setActiveSessionId(newSession.id);
     } catch (e) {
       console.error(e);
     }

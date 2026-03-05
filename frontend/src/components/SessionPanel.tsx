@@ -14,6 +14,7 @@ export default function SessionPanel() {
   const { sessionList, activeSessionId, setActiveSessionId, fetchSessions, createSession, renameSession, removeSession, addToast } = useAppStore();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('未命名会话');
+  const [newContentMode, setNewContentMode] = useState<api.Session['content_mode']>('food');
 
   const [dropdownState, setDropdownState] = useState<SessionDropdownState | null>(null);
   const [renameSessionObj, setRenameSessionObj] = useState<api.Session | null>(null);
@@ -78,11 +79,33 @@ export default function SessionPanel() {
     };
   }, [dropdownState]);
 
+  useEffect(() => {
+    const hasOpenModal = showCreateModal || !!renameSessionObj || !!deleteSessionObj;
+    if (!hasOpenModal) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      // 修复点：会话相关弹窗支持 Escape 关闭，减少重复点按鼠标。
+      if (deleteSessionObj) {
+        setDeleteSessionObj(null);
+        return;
+      }
+      if (renameSessionObj) {
+        setRenameSessionObj(null);
+        return;
+      }
+      setShowCreateModal(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [deleteSessionObj, renameSessionObj, showCreateModal]);
+
   const handleCreateConfirm = () => {
     if (newTitle.trim()) {
-      createSession(newTitle, 'food');
+      // 修复点：新建会话时不再硬编码 food，显式让用户选择内容模式。
+      createSession(newTitle, newContentMode);
       setShowCreateModal(false);
       setNewTitle('未命名会话');
+      setNewContentMode('food');
       addToast('会话已创建', 'success');
     }
   };
@@ -157,8 +180,28 @@ export default function SessionPanel() {
                 placeholder="例如: 奶油草莓蛋糕设计" 
               />
             </div>
+            <div className="input-group" style={{ marginTop: '12px' }}>
+              <label className="input-label">内容模式</label>
+              <select
+                className="input"
+                value={newContentMode}
+                onChange={(event) => setNewContentMode(event.target.value as api.Session['content_mode'])}
+              >
+                <option value="food">美食</option>
+                <option value="scenic">景点</option>
+                <option value="food_scenic">美食 + 景点</option>
+              </select>
+            </div>
             <div style={{ marginTop: '24px', display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
-              <button className="btn btn-ghost" onClick={() => setShowCreateModal(false)}>取消</button>
+              <button
+                className="btn btn-ghost"
+                onClick={() => {
+                  setShowCreateModal(false);
+                  setNewContentMode('food');
+                }}
+              >
+                取消
+              </button>
               <button className="btn btn-primary" onClick={handleCreateConfirm} disabled={!newTitle.trim()}>
                 确认创建
               </button>

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 from fastapi import UploadFile
 
+from backend.app.agent import CreativeAgent, CreativeAgentTurn
 from backend.app.core.errors import DomainError, not_found
 from backend.app.core.utils import new_id, now_iso
 from backend.app.infra.storage import Storage
@@ -40,6 +42,9 @@ class InspirationService(InspirationFlowMixin):
         style_service: StyleService,
         model_service: ModelService,
         storage: Storage,
+        generation_worker: Any | None = None,
+        agent_mode: str = "legacy",
+        creative_agent: CreativeAgent | None = None,
     ):
         self.inspiration_repo = inspiration_repo
         self.session_repo = session_repo
@@ -50,6 +55,10 @@ class InspirationService(InspirationFlowMixin):
         self.style_service = style_service
         self.model_service = model_service
         self.storage = storage
+        self.generation_worker = generation_worker
+        self.agent_mode = agent_mode
+        self.creative_agent = creative_agent
+        self._agent_meta_by_session: dict[str, dict[str, Any]] = {}
 
     def get_conversation(self, session_id: str) -> dict[str, Any]:
         session = self.session_repo.get(session_id)
@@ -81,7 +90,6 @@ class InspirationService(InspirationFlowMixin):
         normalized_text = (text or "").strip()
         normalized_items = self._normalize_selected_items(selected_items)
         normalized_action = (action or "").strip() or None
-        _ = image_usages
         if not normalized_text and not normalized_items and not normalized_action and not images and not videos:
             raise DomainError(code="E-1099", message="请输入内容或选择选项", status_code=400)
 
@@ -91,6 +99,7 @@ class InspirationService(InspirationFlowMixin):
         attachments = await self._save_attachments(
             session_id=session_id,
             text=normalized_text,
+            image_usages=image_usages,
             images=images,
             videos=videos,
         )
@@ -120,6 +129,23 @@ class InspirationService(InspirationFlowMixin):
             self._handle_use_style_profile(session, state, normalized_text, normalized_items)
             return self._build_response(session_id, state)
 
+        if self.agent_mode == "langgraph":
+            try:
+                agent_turn = self._run_agent_turn(
+                    session=session,
+                    state=state,
+                    text=normalized_text,
+                    selected_items=normalized_items,
+                    action=normalized_action,
+                    attachments=attachments,
+                )
+            except Exception:
+                logger.exception("Agent 模式执行失败，回退到固定流程: session_id=%s", session_id)
+                self._set_agent_meta(session_id, self._default_agent_meta("legacy"))
+            else:
+                self._apply_agent_turn(session_id=session_id, state=state, turn=agent_turn)
+                return self._build_response(session_id, state)
+
         stage = state.get("stage", "style_collecting")
         if stage == "prompt_revision":
             self._handle_prompt_revision(
@@ -137,6 +163,154 @@ class InspirationService(InspirationFlowMixin):
 
         self._handle_collecting_stage(session_id, session, state, normalized_text, normalized_items)
         return self._build_response(session_id, state)
+
+    def _run_agent_turn(
+        self,
+        *,
+        session: dict[str, Any],
+        state: dict[str, Any],
+        text: str,
+        selected_items: list[str],
+        action: str | None,
+        attachments: list[dict[str, Any]],
+    ) -> CreativeAgentTurn | dict[str, Any]:
+        if not self.creative_agent:
+            raise DomainError(code="E-1006", message="Agent 模式尚未初始化", status_code=503)
+        request_payload = {
+            "session_id": session["id"],
+            "text": text,
+            "selected_items": selected_items,
+            "action": action,
+            "attachments": attachments,
+            "state": {
+                "stage": state.get("stage", "style_collecting"),
+                "locked": bool(state.get("locked")),
+                "style_payload": self._build_style_payload(state),
+                "style_prompt": str(state.get("style_prompt") or ""),
+                "image_count": state.get("image_count"),
+                "allocation_plan": state.get("allocation_plan") if isinstance(state.get("allocation_plan"), list) else [],
+            },
+        }
+        self._active_agent_session_id = session["id"]
+        try:
+            return self.creative_agent.respond(request_payload)
+        finally:
+            self._active_agent_session_id = None
+
+    def _apply_agent_turn(
+        self,
+        *,
+        session_id: str,
+        state: dict[str, Any],
+        turn: CreativeAgentTurn | dict[str, Any],
+    ) -> None:
+        turn_payload = turn if isinstance(turn, dict) else turn.__dict__
+        if turn_payload.get("style_payload") is not None:
+            state["style_payload"] = self.style_service._normalize_style_payload(turn_payload["style_payload"])
+        if turn_payload.get("style_prompt") is not None:
+            state["style_prompt"] = str(turn_payload.get("style_prompt") or "").strip()
+        if turn_payload.get("image_count") is not None:
+            state["image_count"] = turn_payload.get("image_count")
+        if turn_payload.get("asset_candidates") is not None:
+            state["asset_candidates"] = turn_payload.get("asset_candidates") or {}
+        if isinstance(turn_payload.get("allocation_plan"), list):
+            state["allocation_plan"] = turn_payload.get("allocation_plan") or []
+        if turn_payload.get("draft_style_id") is not None:
+            state["draft_style_id"] = turn_payload.get("draft_style_id")
+        if turn_payload.get("requirement_ready") is not None:
+            state["requirement_ready"] = bool(turn_payload.get("requirement_ready"))
+        if turn_payload.get("prompt_confirmable") is not None:
+            state["prompt_confirmable"] = bool(turn_payload.get("prompt_confirmable"))
+        state["stage"] = str(turn_payload.get("stage") or state.get("stage") or "style_collecting")
+        state["locked"] = bool(turn_payload.get("locked", state.get("locked")))
+        state["updated_at"] = now_iso()
+        self.inspiration_repo.upsert_state(state)
+        reply_text = str(turn_payload.get("reply") or "").strip() or "Agent 已处理当前请求。"
+        self._append_message(
+            session_id=session_id,
+            role="assistant",
+            content=reply_text,
+            stage=state["stage"],
+            attachments=[],
+            options=turn_payload.get("options"),
+            fallback_used=False,
+            asset_candidates=turn_payload.get("asset_candidates"),
+            style_context=self._build_style_context(state),
+        )
+        self._set_agent_meta(
+            session_id,
+            {
+                "mode": "langgraph",
+                "dynamic_stage": turn_payload.get("dynamic_stage"),
+                "dynamic_stage_label": turn_payload.get("dynamic_stage_label"),
+                "trace": turn_payload.get("trace") or [],
+            },
+        )
+
+    def _set_agent_meta(self, session_id: str, meta: dict[str, Any]) -> None:
+        self._agent_meta_by_session[session_id] = meta
+
+    def _default_agent_meta(self, mode: str) -> dict[str, Any]:
+        return {
+            "mode": mode,
+            "dynamic_stage": None,
+            "dynamic_stage_label": None,
+            "trace": [],
+        }
+
+    def _build_agent_meta(self, session_id: str, state: dict[str, Any]) -> dict[str, Any]:
+        cached = self._agent_meta_by_session.get(session_id)
+        if cached:
+            return cached
+        if self.agent_mode == "langgraph":
+            return {
+                "mode": "langgraph",
+                "dynamic_stage": state.get("stage"),
+                "dynamic_stage_label": None,
+                "trace": [],
+            }
+        return self._default_agent_meta("legacy")
+
+    def suggest_painting_style(self, *, stage: str, user_reply: str, selected_items: list[str]) -> dict[str, Any]:
+        session_id = str(getattr(self, "_active_agent_session_id", "") or "").strip()
+        if not session_id:
+            raise DomainError(code="E-1099", message="Agent 缺少会话上下文", status_code=500)
+        return self.style_service.chat(
+            session_id=session_id,
+            stage=stage,
+            user_reply=user_reply,
+            selected_items=selected_items,
+        )
+
+    def extract_assets(self, *, session_id: str, user_hint: str, style_prompt: str) -> dict[str, Any]:
+        return self._extract_asset_candidates(session_id, user_hint, style_prompt)
+
+    def generate_style_prompt(self, *, session_id: str, feedback: str) -> dict[str, Any]:
+        session = self.session_repo.get(session_id)
+        if not session:
+            raise not_found("会话", session_id)
+        state = self._ensure_state(session_id)
+        prompt_text = self._generate_style_prompt(session, state, feedback)
+        return {
+            "style_prompt": prompt_text,
+            "image_count": state.get("image_count"),
+        }
+
+    def allocate_assets_to_images(self, *, session_id: str, user_hint: str) -> list[dict[str, Any]]:
+        session = self.session_repo.get(session_id)
+        if not session:
+            raise not_found("会话", session_id)
+        state = self._ensure_state(session_id)
+        return self._build_allocation_plan(session=session, state=state, user_hint=user_hint)
+
+    def generate_images(self, *, job_id: str) -> dict[str, Any]:
+        if not self.generation_worker:
+            raise DomainError(code="E-1099", message="生成 Worker 不可用", status_code=500)
+        self.generation_worker.schedule(job_id)
+        return {"job_id": job_id, "status": "queued"}
+
+    def generate_copy(self, *, job_id: str) -> dict[str, Any]:
+        return {"job_id": job_id, "status": "queued"}
 
     def _handle_collecting_stage(
         self,
@@ -472,6 +646,7 @@ class InspirationService(InspirationFlowMixin):
         self,
         session_id: str,
         text: str,
+        image_usages: list[str],
         images: list[UploadFile],
         videos: list[UploadFile],
     ) -> list[dict[str, Any]]:
@@ -479,13 +654,16 @@ class InspirationService(InspirationFlowMixin):
         if text:
             text_asset = self.asset_service.create_text_asset(session_id, "text", text)
             attachments.append(self._build_attachment(text_asset["id"], "text", "文本", None, "ready"))
-        for image in images:
+        for index, image in enumerate(images):
             image_name = image.filename or "upload.png"
             image_suffix = Path(image_name).suffix or ".png"
             image_file_name = f"{session_id}_{new_id()}{image_suffix}"
             image_content = await image.read()
             image_path = self.storage.save_image(image_file_name, image_content)
             image_preview_url = self.style_service._build_public_image_url(image_path)
+            usage_type = self._normalize_image_usage(
+                image_usages[index] if index < len(image_usages) else None,
+            )
             image_asset = self.asset_repo.create(
                 {
                     "id": new_id(),
@@ -504,7 +682,7 @@ class InspirationService(InspirationFlowMixin):
                     image_name,
                     image_preview_url,
                     "ready",
-                    usage_type="content_asset",
+                    usage_type=usage_type,
                 )
             )
         for video in videos:
@@ -528,6 +706,11 @@ class InspirationService(InspirationFlowMixin):
                 )
             )
         return attachments
+
+    def _normalize_image_usage(self, raw_value: str | None) -> str:
+        if isinstance(raw_value, str) and raw_value.strip() == "style_reference":
+            return "style_reference"
+        return "content_asset"
 
     def _build_attachment(
         self,
@@ -651,18 +834,18 @@ class InspirationService(InspirationFlowMixin):
         if image_count <= 1:
             return True
         compact = prompt_text.replace(" ", "")
-        if "生成两张" in compact or "生成三张" in compact or "生成四张" in compact or "一次生成多张" in compact:
+        multi_pattern = re.compile(r"生成[两二三四五六七八九十\d]+张")
+        if multi_pattern.search(compact) or "一次生成多张" in compact:
             return False
         lines = [line.strip(" -•\t") for line in prompt_text.splitlines() if line.strip()]
         one_image_lines = [line for line in lines if line.startswith("生成一张")]
         return len(one_image_lines) >= image_count
 
     def _looks_like_internal_parameter_dump(self, text: str) -> bool:
-        lowered = text.lower()
         markers = ("风格参数", "修订意见", "prompt_prefix", "style_payload")
         if any(marker in text for marker in markers):
             return True
-        return "json" in lowered and "{" in text and "}" in text
+        return False
 
     def _call_text_model_with_retry(
         self,

@@ -59,6 +59,7 @@ export interface InspirationAttachment {
   name?: string;
   preview_url?: string;
   status: 'ready' | 'processing' | 'failed';
+  usage_type?: 'style_reference' | 'content_asset' | null;
 }
 
 export interface StylePayload {
@@ -110,6 +111,23 @@ export interface InspirationDraft {
   locked: boolean;
 }
 
+export interface InspirationAgentTraceStep {
+  id: string;
+  node: string;
+  decision?: string | null;
+  tool_name?: string | null;
+  summary?: string | null;
+  status: 'planned' | 'completed' | 'skipped' | 'failed';
+  created_at: string;
+}
+
+export interface InspirationAgentMeta {
+  mode: 'legacy' | 'langgraph';
+  dynamic_stage?: string | null;
+  dynamic_stage_label?: string | null;
+  trace: InspirationAgentTraceStep[];
+}
+
 export interface InspirationAllocationPlanItem {
   slot_index: number;
   focus_title: string;
@@ -126,6 +144,7 @@ export interface InspirationConversationResponse {
   session_id: string;
   messages: InspirationMessage[];
   draft: InspirationDraft;
+  agent?: InspirationAgentMeta | null;
 }
 
 
@@ -252,7 +271,7 @@ export interface ModelRoutingConfig {
 export const getSessions = () => api.get<{items: Session[]}>('/sessions').then(res => res.data);
 export const createSession = (data: { title: string, content_mode: string }) => api.post<Session>('/sessions', data).then(res => res.data);
 export const getSessionDetail = (id: string) => api.get<{session: Session, assets: Asset[], jobs: GenerationJob[], exports: ExportTask[]}>('/sessions/' + id).then(res => res.data);
-export const updateSession = (id: string, data: { title: string }) => api.patch<Session>(`/sessions/${id}`, data).then(res => res.data);
+export const updateSession = (id: string, data: { title: string, content_mode?: Session['content_mode'] }) => api.patch<Session>(`/sessions/${id}`, data).then(res => res.data);
 export const deleteSession = (id: string) => api.delete(`/sessions/${id}`).then(res => res.data);
 
 export const uploadVideoAsset = (sessionId: string, file: File) => {

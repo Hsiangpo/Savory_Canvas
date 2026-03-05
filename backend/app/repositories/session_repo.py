@@ -44,22 +44,24 @@ class SessionRepository:
             (session_id,),
         )
 
-    def update_session_title(
+    def update_session(
         self,
         session_id: str,
         title: str,
+        content_mode: str | None,
         updated_at: str,
     ) -> dict[str, Any] | None:
         found = self.get(session_id)
         if not found:
             return None
+        next_content_mode = content_mode or found["content_mode"]
         self.db.execute(
             """
             UPDATE session
-            SET title = ?, updated_at = ?
+            SET title = ?, content_mode = ?, updated_at = ?
             WHERE id = ?
             """,
-            (title, updated_at, session_id),
+            (title, next_content_mode, updated_at, session_id),
         )
         return self.get(session_id)
 

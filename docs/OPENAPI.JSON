@@ -1199,6 +1199,14 @@
         "properties": {
           "title": {
             "type": "string"
+          },
+          "content_mode": {
+            "type": "string",
+            "enum": [
+              "food",
+              "scenic",
+              "food_scenic"
+            ]
           }
         }
       },
@@ -1590,6 +1598,73 @@
           }
         }
       },
+      "InspirationAgentTraceStep": {
+        "type": "object",
+        "required": [
+          "id",
+          "node",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "planned",
+              "completed",
+              "skipped",
+              "failed"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "InspirationAgentMeta": {
+        "type": "object",
+        "required": [
+          "mode",
+          "trace"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "langgraph"
+            ]
+          },
+          "dynamic_stage": {
+            "type": "string"
+          },
+          "dynamic_stage_label": {
+            "type": "string"
+          },
+          "trace": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InspirationAgentTraceStep"
+            }
+          }
+        }
+      },
       "InspirationDraft": {
         "type": "object",
         "required": [
@@ -1647,6 +1722,16 @@
           },
           "draft": {
             "$ref": "#/components/schemas/InspirationDraft"
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InspirationAgentMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },

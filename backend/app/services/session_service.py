@@ -35,10 +35,11 @@ class SessionService:
     def list_sessions(self) -> list[dict]:
         return self.session_repo.list_all()
 
-    def rename_session(self, session_id: str, title: str) -> dict:
-        updated = self.session_repo.update_session_title(
+    def rename_session(self, session_id: str, title: str, content_mode: str | None = None) -> dict:
+        updated = self.session_repo.update_session(
             session_id=session_id,
             title=title,
+            content_mode=content_mode,
             updated_at=now_iso(),
         )
         if not updated:

@@ -59,9 +59,10 @@ class ExportService:
         file_url = task.get("file_url")
         if not isinstance(file_url, str) or not file_url.strip():
             return task
+        hydrated_task = {**task}
         normalized = file_url.replace("\\", "/").strip()
         if normalized.startswith("http://") or normalized.startswith("https://"):
-            return task
+            return hydrated_task
         static_relative = normalized.lstrip("/")
         if static_relative.startswith("static/"):
             static_relative = static_relative[len("static/") :]
@@ -70,5 +71,5 @@ class ExportService:
                 static_relative = Path(file_url).resolve().relative_to(self.storage.base_dir.resolve()).as_posix()
             except Exception:
                 static_relative = static_relative
-        task["file_url"] = f"{self.public_base_url}/static/{static_relative.lstrip('/')}"
-        return task
+        hydrated_task["file_url"] = f"{self.public_base_url}/static/{static_relative.lstrip('/')}"
+        return hydrated_task

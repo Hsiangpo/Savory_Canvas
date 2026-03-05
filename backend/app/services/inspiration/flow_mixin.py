@@ -881,6 +881,10 @@ class InspirationFlowMixin(InspirationRequirementMixin, InspirationStyleSaveMixi
     def _build_response(self, session_id: str, state: dict[str, Any]) -> dict[str, Any]:
         messages = self.inspiration_repo.list_messages(session_id)
         self._hydrate_attachment_preview_urls(messages)
+        agent_meta = None
+        build_agent_meta = getattr(self, "_build_agent_meta", None)
+        if callable(build_agent_meta):
+            agent_meta = build_agent_meta(session_id, state)
         return {
             "session_id": session_id,
             "messages": messages,
@@ -892,6 +896,7 @@ class InspirationFlowMixin(InspirationRequirementMixin, InspirationStyleSaveMixi
                 "allocation_plan": state.get("allocation_plan") if isinstance(state.get("allocation_plan"), list) else [],
                 "locked": bool(state.get("locked")),
             },
+            "agent": agent_meta,
         }
 
     def _hydrate_attachment_preview_urls(self, messages: list[dict[str, Any]]) -> None:

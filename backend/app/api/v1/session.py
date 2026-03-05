@@ -37,7 +37,7 @@ def update_session(
     payload: SessionUpdateRequest,
     service: SessionService = Depends(get_session_service),
 ) -> dict:
-    return service.rename_session(session_id, payload.title)
+    return service.rename_session(session_id, payload.title, payload.content_mode)
 
 
 @router.delete("/sessions/{session_id}", response_model=DeleteResponse)

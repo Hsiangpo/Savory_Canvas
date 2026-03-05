@@ -117,6 +117,23 @@ class InspirationAllocationPlanItem(BaseModel):
     confirmed: bool = False
 
 
+class InspirationAgentTraceStep(BaseModel):
+    id: str
+    node: str
+    decision: str | None = None
+    tool_name: str | None = None
+    summary: str | None = None
+    status: Literal["planned", "completed", "skipped", "failed"]
+    created_at: str
+
+
+class InspirationAgentMeta(BaseModel):
+    mode: Literal["legacy", "langgraph"]
+    dynamic_stage: str | None = None
+    dynamic_stage_label: str | None = None
+    trace: list[InspirationAgentTraceStep] = Field(default_factory=list)
+
+
 class InspirationDraft(BaseModel):
     stage: Literal["style_collecting", "prompt_revision", "asset_confirming", "locked"]
     style_payload: StylePayload | None = None
@@ -130,6 +147,7 @@ class InspirationConversationResponse(BaseModel):
     session_id: str
     messages: list[InspirationMessage]
     draft: InspirationDraft
+    agent: InspirationAgentMeta | None = None
 
 
 class StyleProfile(BaseModel):

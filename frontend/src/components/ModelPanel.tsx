@@ -146,6 +146,24 @@ export default function ModelPanel({ onClose }: ModelPanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      // 修复点：模型设置及其子弹窗支持 Escape 关闭。
+      if (confirmDeleteId) {
+        setConfirmDeleteId(null);
+        return;
+      }
+      if (showAddProvider) {
+        setShowAddProvider(false);
+        return;
+      }
+      onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [confirmDeleteId, onClose, showAddProvider]);
+
   const handleDeleteProvider = async (id: string) => {
     try {
       await api.deleteProvider(id);

@@ -18,7 +18,7 @@ type SavePickerFn = (options?: {
 
 export default function ExportPanel() {
   const { activeSessionId, latestJob, addToast } = useAppStore();
-  const [isExporting, setIsExporting] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState<'pdf' | 'long_image' | null>(null);
   const exportPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const clearExportPoll = () => {
@@ -47,20 +47,23 @@ export default function ExportPanel() {
     return `${api.STATIC_BASE_URL}/static/${normalized}`;
   };
 
-  const downloadPdfFile = async (fileUrl: string, exportId: string) => {
+  const downloadExportFile = async (fileUrl: string, exportId: string, format: 'pdf' | 'long_image') => {
     const downloadUrl = resolveFileUrl(fileUrl);
     const response = await fetch(downloadUrl);
     if (!response.ok) {
       throw new Error(`下载失败，状态码: ${response.status}`);
     }
     const blob = await response.blob();
-    const fileName = `savory-canvas-${exportId}.pdf`;
+    const fileName = `savory-canvas-${exportId}.${format === 'pdf' ? 'pdf' : 'png'}`;
+    const mimeType = format === 'pdf' ? 'application/pdf' : 'image/png';
+    const extension = format === 'pdf' ? '.pdf' : '.png';
+    const description = format === 'pdf' ? 'PDF 文件' : 'PNG 图片';
 
     const win = window as Window & { showSaveFilePicker?: SavePickerFn };
     if (typeof win.showSaveFilePicker === 'function') {
       const handle = await win.showSaveFilePicker({
         suggestedName: fileName,
-        types: [{ description: 'PDF 文件', accept: { 'application/pdf': ['.pdf'] } }],
+        types: [{ description, accept: { [mimeType]: [extension] } }],
       });
       const writable = await handle.createWritable();
       await writable.write(blob);
@@ -78,17 +81,18 @@ export default function ExportPanel() {
     URL.revokeObjectURL(blobUrl);
   };
 
-  const handleExport = async () => {
+  const handleExport = async (format: 'pdf' | 'long_image') => {
     if (!canExport || !activeSessionId || !latestJob) return;
 
-    setIsExporting(true);
+    setExportingFormat(format);
     clearExportPoll();
 
     try {
       const task = await api.createExport({
         session_id: activeSessionId,
         job_id: latestJob.id,
-        export_format: 'pdf'
+        // 修复点：导出面板补齐 long_image 入口，并按用户所选格式发起导出。
+        export_format: format,
       });
 
       exportPollRef.current = setInterval(async () => {
@@ -97,25 +101,25 @@ export default function ExportPanel() {
           if (exportTask.status === 'success') {
             clearExportPoll();
             if (exportTask.file_url) {
-              await downloadPdfFile(exportTask.file_url, exportTask.id);
-              addToast('PDF 导出成功', 'success');
+              await downloadExportFile(exportTask.file_url, exportTask.id, format);
+              addToast(format === 'pdf' ? 'PDF 导出成功' : '长图导出成功', 'success');
             } else {
               addToast('导出成功，但未返回文件地址', 'error');
             }
-            setIsExporting(false);
+            setExportingFormat(null);
           } else if (exportTask.status === 'failed') {
-            setIsExporting(false);
+            setExportingFormat(null);
             clearExportPoll();
             addToast(`导出失败: ${exportTask.error_message || '未知错误'}`, 'error');
           }
         } catch {
-          setIsExporting(false);
+          setExportingFormat(null);
           clearExportPoll();
           addToast('导出文件下载失败', 'error');
         }
       }, 2000);
     } catch {
-      setIsExporting(false);
+      setExportingFormat(null);
       clearExportPoll();
       addToast('创建任务失败', 'error');
     }
@@ -131,11 +135,20 @@ export default function ExportPanel() {
         <button
           className="btn btn-secondary"
           style={{ flex: 1, padding: '12px' }}
-          disabled={!canExport || isExporting}
-          onClick={handleExport}
+          disabled={!canExport || exportingFormat !== null}
+          onClick={() => handleExport('pdf')}
         >
-          {isExporting ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+          {exportingFormat === 'pdf' ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
           导出 PDF
+        </button>
+        <button
+          className="btn btn-secondary"
+          style={{ flex: 1, padding: '12px' }}
+          disabled={!canExport || exportingFormat !== null}
+          onClick={() => handleExport('long_image')}
+        >
+          {exportingFormat === 'long_image' ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+          导出长图
         </button>
       </div>
 

@@ -12,6 +12,7 @@ class Database:
     def __init__(self, db_path: Path):
         self._db_path = db_path
         self._lock = threading.RLock()
+        self._local = threading.local()
 
     @property
     def db_path(self) -> Path:
@@ -92,32 +93,45 @@ class Database:
         connection = sqlite3.connect(str(self._db_path), check_same_thread=False)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        return connection
+
+    def _thread_connection(self) -> sqlite3.Connection:
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = self._connect()
+            self._local.connection = connection
         return connection
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
-            connection = self._connect()
+            connection = self._thread_connection()
+            manage_transaction = not connection.in_transaction
             try:
                 yield connection
-                connection.commit()
+                if manage_transaction:
+                    connection.commit()
             except Exception:
-                connection.rollback()
+                if manage_transaction and connection.in_transaction:
+                    connection.rollback()
                 raise
-            finally:
-                connection.close()
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         with self.transaction() as conn:
             conn.execute(sql, params)
 
     def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
-        with self.transaction() as conn:
+        conn = self._thread_connection()
+        with self._lock:
             row = conn.execute(sql, params).fetchone()
         return dict(row) if row else None
 
     def fetch_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        with self.transaction() as conn:
+        conn = self._thread_connection()
+        with self._lock:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 

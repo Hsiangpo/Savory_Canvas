@@ -75,6 +75,8 @@ export default function ResultPanel() {
         addToast('已复制到剪贴板', 'success');
       } catch (err) {
         console.error('Failed to copy', err);
+        // 修复点：复制失败时给出明确错误提示，避免用户误判为已复制成功。
+        addToast('复制失败，请手动选择复制', 'error');
       }
     }
   };

@@ -58,6 +58,9 @@ class ExportWorker:
             if task["export_format"] == "pdf":
                 file_content = self._build_pdf_bytes(images=images, copy_result=copy_result)
                 extension = "pdf"
+            elif task["export_format"] == "long_image":
+                file_content = self._build_long_image_bytes(images=images, copy_result=copy_result)
+                extension = "png"
             else:
                 file_content = str(copy_result.get("full_text") or "")
                 extension = "txt"
@@ -119,6 +122,141 @@ class ExportWorker:
         append_pages = [page.convert("RGB") for page in pages[1:]]
         first_page.save(buffer, format="PDF", save_all=True, append_images=append_pages, resolution=150.0)
         return buffer.getvalue()
+
+    def _build_long_image_bytes(self, *, images: list[dict[str, Any]], copy_result: dict[str, Any]) -> bytes:
+        from PIL import Image, ImageDraw, ImageFont
+
+        canvas_width = 1080
+        margin = 48
+        image_gap = 24
+        section_font = self._load_font(size=34, bold=True, fallback=ImageFont)
+        text_font = self._load_font(size=28, bold=False, fallback=ImageFont)
+        small_font = self._load_font(size=24, bold=False, fallback=ImageFont)
+        prepared_images = self._prepare_long_image_blocks(
+            images=images,
+            canvas_width=canvas_width,
+            margin=margin,
+            text_font=text_font,
+        )
+        text_blocks = self._build_long_image_text_blocks(copy_result)
+
+        total_height = margin
+        for image in prepared_images:
+            total_height += image.height + image_gap
+        total_height += self._estimate_text_blocks_height(
+            text_blocks=text_blocks,
+            canvas_width=canvas_width,
+            margin=margin,
+            text_font=text_font,
+            small_font=small_font,
+        )
+        total_height += margin
+
+        canvas = Image.new("RGB", (canvas_width, total_height), "#fffdfa")
+        draw = ImageDraw.Draw(canvas)
+        y = margin
+
+        for image in prepared_images:
+            paste_x = (canvas_width - image.width) // 2
+            canvas.paste(image, (paste_x, y))
+            y += image.height + image_gap
+
+        for title, content in text_blocks:
+            draw.text((margin, y), title, font=small_font, fill="#f97352")
+            y += 38
+            y = self._draw_wrapped_text(
+                draw,
+                content or "无",
+                text_font,
+                margin,
+                y,
+                canvas_width - margin,
+                "#2d2d2d",
+                1.6,
+            )
+            y += 22
+
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def _prepare_long_image_blocks(self, *, images: list[dict[str, Any]], canvas_width: int, margin: int, text_font) -> list:
+        from PIL import Image, ImageDraw
+
+        prepared: list[Image.Image] = []
+        max_width = canvas_width - margin * 2
+        for item in images:
+            image_path = self._resolve_image_file_path(item.get("image_path"))
+            if image_path and image_path.is_file():
+                with Image.open(image_path) as raw:
+                    image = raw.convert("RGB")
+                ratio = min(max_width / image.width, 1.0)
+                resized = image.resize((max(1, int(image.width * ratio)), max(1, int(image.height * ratio))))
+                prepared.append(resized)
+                continue
+            placeholder = Image.new("RGB", (max_width, 320), "#fff4f1")
+            draw = ImageDraw.Draw(placeholder)
+            draw.text((32, 132), "图片文件不存在，已跳过渲染。", font=text_font, fill="#d9464a")
+            prepared.append(placeholder)
+        return prepared
+
+    def _build_long_image_text_blocks(self, copy_result: dict[str, Any]) -> list[tuple[str, str]]:
+        blocks: list[tuple[str, str]] = []
+        title = str(copy_result.get("title") or "").strip()
+        if title:
+            blocks.append(("标题", title))
+        intro = str(copy_result.get("intro") or "").strip()
+        if intro:
+            blocks.append(("导语", intro))
+        sections = copy_result.get("guide_sections")
+        if isinstance(sections, list):
+            for index, section in enumerate(sections, start=1):
+                if not isinstance(section, dict):
+                    continue
+                heading = str(section.get("heading") or f"段落 {index}").strip()
+                content = str(section.get("content") or "").strip()
+                if content:
+                    blocks.append((heading, content))
+        ending = str(copy_result.get("ending") or "").strip()
+        if ending:
+            blocks.append(("结语", ending))
+        if not blocks:
+            blocks.append(("文案", str(copy_result.get("full_text") or "无").strip() or "无"))
+        return blocks
+
+    def _estimate_text_blocks_height(
+        self,
+        *,
+        text_blocks: list[tuple[str, str]],
+        canvas_width: int,
+        margin: int,
+        text_font,
+        small_font,
+    ) -> int:
+        from PIL import Image, ImageDraw
+
+        probe = Image.new("RGB", (canvas_width, 10), "#ffffff")
+        draw = ImageDraw.Draw(probe)
+        line_height = int(getattr(text_font, "size", 24) * 1.6)
+        total_height = 0
+        max_width = canvas_width - margin * 2
+        for _title, content in text_blocks:
+            total_height += max(getattr(small_font, "size", 24), 24) + 14
+            text = str(content or "").splitlines() or [""]
+            line_count = 0
+            for raw_line in text:
+                current = ""
+                for char in raw_line:
+                    probe_text = current + char
+                    box = draw.textbbox((0, 0), probe_text, font=text_font)
+                    if box[2] - box[0] <= max_width:
+                        current = probe_text
+                        continue
+                    line_count += 1
+                    current = char
+                line_count += 1
+            total_height += line_count * line_height + 22
+        return total_height
 
     def _build_image_pages(
         self,

@@ -12,6 +12,7 @@ class SessionCreateRequest(BaseModel):
 
 class SessionUpdateRequest(BaseModel):
     title: str
+    content_mode: Literal["food", "scenic", "food_scenic"] | None = None
 
 
 class AssetTextCreateRequest(BaseModel):

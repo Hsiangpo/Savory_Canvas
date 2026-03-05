@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
-import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -13,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.app.agent import AgentLLMProvider, CreativeAgent
+from backend.app.agent.tools import build_creative_tools
 from backend.app.api.router import api_router
 from backend.app.core.errors import DomainError
 from backend.app.core.settings import load_settings
@@ -40,9 +39,6 @@ from backend.app.workers.export_worker import ExportWorker
 from backend.app.workers.generation_worker import GenerationWorker
 from backend.app.workers.transcript_worker import TranscriptWorker
 
-_AUTO_CLEAN_DONE = False
-
-
 def _ensure_utf8_stdio() -> None:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -54,21 +50,8 @@ def _ensure_utf8_stdio() -> None:
             continue
 
 
-def _maybe_cleanup_old_backend_processes() -> None:
-    global _AUTO_CLEAN_DONE
-    if _AUTO_CLEAN_DONE:
-        return
-    _AUTO_CLEAN_DONE = True
-    if os.name != "nt":
-        return
-    if os.getenv("SAVORY_CANVAS_AUTOCLEAN_ENABLED", "1") != "1":
-        return
-    command_line = " ".join(sys.argv).lower()
-    if "uvicorn" not in command_line or "backend.app.main:app" not in command_line:
-        return
-    port = _extract_cli_port(default_port=8000)
-    protected_pids = _get_protected_pids()
-    _kill_port_listeners(port, protected_pids)
+def _is_legacy_inspiration_mode() -> bool:
+    return any(arg == "--legacy" for arg in sys.argv)
 
 
 def _extract_cli_port(default_port: int) -> int:
@@ -86,57 +69,19 @@ def _extract_cli_port(default_port: int) -> int:
     return default_port
 
 
-def _get_protected_pids() -> set[int]:
-    protected = {os.getpid()}
-    parent_pid = os.getppid()
-    if parent_pid > 0:
-        protected.add(parent_pid)
-    return protected
-
-
-def _kill_port_listeners(port: int, protected_pids: set[int]) -> None:
-    try:
-        output = subprocess.check_output(
-            ["netstat", "-ano", "-p", "tcp"],
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-        )
-    except (OSError, subprocess.SubprocessError):
-        return
-    listener_pids: set[int] = set()
-    for line in output.splitlines():
-        text = line.strip()
-        if not text or "LISTENING" not in text:
-            continue
-        parts = text.split()
-        if len(parts) < 5:
-            continue
-        local_address = parts[1]
-        status = parts[3]
-        pid_text = parts[4]
-        if status != "LISTENING" or not pid_text.isdigit():
-            continue
-        if not local_address.endswith(f":{port}"):
-            continue
-        process_id = int(pid_text)
-        if process_id not in protected_pids:
-            listener_pids.add(process_id)
-    for process_id in listener_pids:
-        subprocess.run(
-            ["taskkill", "/PID", str(process_id), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    if listener_pids:
-        time.sleep(0.4)
+def _extract_cli_host(default_host: str) -> str:
+    for index, arg in enumerate(sys.argv):
+        if arg == "--host" and index + 1 < len(sys.argv):
+            return sys.argv[index + 1]
+        if arg.startswith("--host="):
+            return arg.split("=", 1)[1]
+    return default_host
 
 
 def create_app() -> FastAPI:
     _ensure_utf8_stdio()
-    _maybe_cleanup_old_backend_processes()
     settings = load_settings()
+    legacy_inspiration_mode = _is_legacy_inspiration_mode()
 
     database = Database(settings.db_path)
     migration_path = Path(__file__).resolve().parents[1] / "migrations" / "001_init.sql"
@@ -209,7 +154,15 @@ def create_app() -> FastAPI:
         style_service=style_service,
         model_service=model_service,
         storage=storage,
+        generation_worker=generation_worker,
+        agent_mode="legacy" if legacy_inspiration_mode else "langgraph",
     )
+    if not legacy_inspiration_mode:
+        inspiration_service.creative_agent = CreativeAgent(
+            llm_provider=AgentLLMProvider(model_service=model_service),
+            tools=build_creative_tools(inspiration_service),
+            db_path=settings.db_path,
+        )
     generation_service = GenerationService(
         job_repo=job_repo,
         result_repo=result_repo,
@@ -237,7 +190,6 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:7778", "http://127.0.0.1:7778"],
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_methods=["*"],
         allow_headers=["*"],
         allow_credentials=False,
@@ -288,3 +240,21 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+def main() -> None:
+    import uvicorn
+
+    host = _extract_cli_host("127.0.0.1")
+    port = _extract_cli_port(default_port=8887)
+    reload_enabled = "--reload" in sys.argv
+    uvicorn.run(
+        "backend.app.main:app",
+        host=host,
+        port=port,
+        reload=reload_enabled,
+    )
+
+
+if __name__ == "__main__":
+    main()

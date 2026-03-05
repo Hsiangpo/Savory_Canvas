@@ -462,6 +462,59 @@ def test_export_task_flow(client):
     assert export_file.read_bytes().startswith(b"%PDF")
 
 
+def test_export_task_flow_long_image_outputs_png(client):
+    setup_model_routing(client)
+    session = create_session(client)
+    asset_resp = client.post(
+        "/api/v1/assets/text",
+        json={
+            "session_id": session["id"],
+            "asset_type": "text",
+            "content": "用一页长图导出西安美食与景点推荐",
+        },
+    )
+    assert asset_resp.status_code == 201
+
+    style = create_style(client, session["id"], {"painting_style": ["旅行手账"]})
+    job = create_generation_job(client, session["id"], style["id"], image_count=1)
+    final_job = wait_for_job_end(client, job["id"])
+    assert final_job["status"] in {"success", "partial_success"}
+
+    export_resp = client.post(
+        "/api/v1/exports",
+        json={
+            "session_id": session["id"],
+            "job_id": job["id"],
+            "export_format": "long_image",
+        },
+    )
+    assert export_resp.status_code == 202
+    export_task = export_resp.json()
+
+    final_export = wait_for_export_end(client, export_task["id"])
+    assert final_export["status"] == "success"
+    assert isinstance(final_export.get("file_url", ""), str)
+    assert final_export["file_url"].startswith("http://127.0.0.1:8887/static/exports/")
+    assert final_export["file_url"].endswith(".png")
+    relative_path = final_export["file_url"].split("/static/", 1)[1]
+    export_file = Path(client.app.state.services.export.storage.base_dir) / Path(*relative_path.split("/"))
+    assert export_file.is_file()
+    assert export_file.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_export_service_public_url_helper_does_not_mutate_input_task(client):
+    export_service = client.app.state.services.export
+    original_task = {
+        "id": "task-1",
+        "file_url": "exports/task-1.pdf",
+    }
+
+    resolved_task = export_service._with_public_file_url(original_task)
+
+    assert resolved_task["file_url"].startswith("http://127.0.0.1:8887/static/exports/")
+    assert original_task["file_url"] == "exports/task-1.pdf"
+
+
 def test_generation_requires_model_routing(client):
     session = create_session(client)
     asset_response = client.post(

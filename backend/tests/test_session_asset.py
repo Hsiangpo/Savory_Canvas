@@ -28,17 +28,18 @@ def test_session_rename_and_delete_flow(client):
 
     rename_resp = client.patch(
         f"/api/v1/sessions/{created['id']}",
-        json={"title": "新会话名"},
+        json={"title": "新会话名", "content_mode": "scenic"},
     )
     assert rename_resp.status_code == 200
     renamed = rename_resp.json()
     assert renamed["id"] == created["id"]
     assert renamed["title"] == "新会话名"
-    assert renamed["content_mode"] == created["content_mode"]
+    assert renamed["content_mode"] == "scenic"
 
     list_resp = client.get("/api/v1/sessions")
     assert list_resp.status_code == 200
     assert list_resp.json()["items"][0]["title"] == "新会话名"
+    assert list_resp.json()["items"][0]["content_mode"] == "scenic"
 
     delete_resp = client.delete(f"/api/v1/sessions/{created['id']}")
     assert delete_resp.status_code == 200

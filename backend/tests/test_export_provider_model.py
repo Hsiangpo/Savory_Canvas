@@ -385,6 +385,43 @@ def test_fetch_provider_models_uses_cache_when_upstream_temporarily_unavailable(
     assert second_models[0]["name"] == "gpt-5.1"
 
 
+def test_fetch_provider_models_fallbacks_to_v1_models_when_root_models_returns_html(monkeypatch):
+    from backend.app.services.model_service import ModelService
+
+    service = ModelService(config_repo=None, provider_repo=None)  # type: ignore[arg-type]
+    provider = {
+        "base_url": "https://example.com",
+        "api_key": "provider-secret",
+    }
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload_text: str):
+            self._payload_text = payload_text
+
+        def read(self):
+            return self._payload_text.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(upstream_request, timeout):
+        assert timeout == 10
+        requested_urls.append(upstream_request.full_url)
+        if upstream_request.full_url.endswith("/v1/models"):
+            payload = {"data": [{"id": "gpt-4.1-mini"}]}
+            return FakeResponse(json.dumps(payload))
+        return FakeResponse("<!doctype html><html><body>not-json</body></html>")
+
+    monkeypatch.setattr("backend.app.services.model_service.request.urlopen", fake_urlopen)
+    models = service.fetch_provider_models(provider)
+    assert [item["name"] for item in models] == ["gpt-4.1-mini"]
+    assert requested_urls[:2] == ["https://example.com/models", "https://example.com/v1/models"]
+
+
 def test_export_task_flow(client):
     setup_model_routing(client)
     session = create_session(client)

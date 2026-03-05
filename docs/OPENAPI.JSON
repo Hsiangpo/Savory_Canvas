@@ -997,6 +997,7 @@
           "Model"
         ],
         "summary": "模型列表",
+        "description": "按 provider_id 拉取模型列表。服务端会优先请求 {base_url}/models；当返回非 JSON 时会自动回退尝试 {base_url}/v1/models。",
         "operationId": "listModels",
         "parameters": [
           {

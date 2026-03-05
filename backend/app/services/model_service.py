@@ -66,7 +66,7 @@ class ModelService:
         return self.config_repo.upsert_model_routing(payload, updated_at=now_iso())
 
     def fetch_provider_models(self, provider: dict[str, Any]) -> list[dict[str, Any]]:
-        endpoint = f"{provider['base_url'].rstrip('/')}/models"
+        endpoints = self._build_model_list_endpoints(provider["base_url"])
         request_headers = {
             "Authorization": f"Bearer {provider['api_key']}",
             "Content-Type": "application/json",
@@ -77,45 +77,56 @@ class ModelService:
                 "Chrome/122.0.0.0 Safari/537.36"
             ),
         }
-        upstream_request = request.Request(
-            url=endpoint,
-            method="GET",
-            headers=request_headers,
-        )
         last_error: DomainError | None = None
-        for _ in range(3):
-            try:
-                with request.urlopen(upstream_request, timeout=10) as response:
-                    body_text = response.read().decode("utf-8")
-            except (url_error.URLError, TimeoutError, OSError) as exc:
-                last_error = DomainError(code="E-1006", message="上游模型列表获取失败", status_code=400)
-                continue
+        for endpoint in endpoints:
+            upstream_request = request.Request(
+                url=endpoint,
+                method="GET",
+                headers=request_headers,
+            )
+            for _ in range(3):
+                try:
+                    with request.urlopen(upstream_request, timeout=10) as response:
+                        body_text = response.read().decode("utf-8")
+                except (url_error.URLError, TimeoutError, OSError):
+                    last_error = DomainError(code="E-1006", message="上游模型列表获取失败", status_code=400)
+                    continue
 
-            try:
-                payload = json.loads(body_text)
-            except json.JSONDecodeError:
-                last_error = DomainError(code="E-1006", message="上游模型列表响应格式错误", status_code=400)
-                continue
+                try:
+                    payload = json.loads(body_text)
+                except json.JSONDecodeError:
+                    last_error = DomainError(code="E-1006", message="上游模型列表响应格式错误", status_code=400)
+                    break
 
-            data_items = payload.get("data") if isinstance(payload, dict) else None
-            if not isinstance(data_items, list):
-                last_error = DomainError(code="E-1006", message="上游模型列表响应格式错误", status_code=400)
-                continue
+                data_items = payload.get("data") if isinstance(payload, dict) else None
+                if not isinstance(data_items, list):
+                    last_error = DomainError(code="E-1006", message="上游模型列表响应格式错误", status_code=400)
+                    break
 
-            models = self._normalize_model_items(data_items)
-            if not models:
-                last_error = DomainError(code="E-1006", message="上游未返回可用模型", status_code=400)
-                continue
-            provider_id = str(provider.get("id") or "").strip()
-            if provider_id:
-                self._provider_model_cache[provider_id] = models
-            return models
+                models = self._normalize_model_items(data_items)
+                if not models:
+                    last_error = DomainError(code="E-1006", message="上游未返回可用模型", status_code=400)
+                    break
+                provider_id = str(provider.get("id") or "").strip()
+                if provider_id:
+                    self._provider_model_cache[provider_id] = models
+                return models
 
         provider_id = str(provider.get("id") or "").strip()
         if provider_id and provider_id in self._provider_model_cache:
             logger.warning("上游模型列表拉取失败，使用缓存模型: provider_id=%s", provider_id)
             return self._provider_model_cache[provider_id]
         raise last_error or DomainError(code="E-1006", message="上游模型列表获取失败", status_code=400)
+
+    def _build_model_list_endpoints(self, base_url: str) -> list[str]:
+        normalized_base_url = base_url.strip().rstrip("/")
+        if not normalized_base_url:
+            return []
+
+        endpoints: list[str] = [f"{normalized_base_url}/models"]
+        if not normalized_base_url.lower().endswith("/v1"):
+            endpoints.append(f"{normalized_base_url}/v1/models")
+        return list(dict.fromkeys(endpoints))
 
     def _normalize_model_items(self, data_items: list[Any]) -> list[dict[str, Any]]:
         models: list[dict[str, Any]] = []

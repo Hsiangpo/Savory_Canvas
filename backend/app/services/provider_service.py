@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from backend.app.core.secrets import decrypt_text, encrypt_text
 from backend.app.core.errors import DomainError, not_found
 from backend.app.core.utils import new_id, now_iso
 from backend.app.repositories.provider_repo import ProviderRepository
@@ -8,7 +9,7 @@ from backend.app.repositories.provider_repo import ProviderRepository
 def mask_api_key(api_key: str) -> str:
     if len(api_key) <= 4:
         return "*" * len(api_key)
-    return f"{api_key[:2]}{'*' * (len(api_key) - 4)}{api_key[-2:]}"
+    return f"{'*' * (len(api_key) - 4)}{api_key[-4:]}"
 
 
 class ProviderService:
@@ -29,7 +30,7 @@ class ProviderService:
             "id": new_id(),
             "name": name,
             "base_url": base_url,
-            "api_key": api_key,
+            "api_key": encrypt_text(api_key),
             "api_key_masked": mask_api_key(api_key),
             "api_protocol": api_protocol,
             "enabled": True,
@@ -51,7 +52,7 @@ class ProviderService:
                 merged[key] = payload[key]
 
         if "api_key" in payload and payload["api_key"]:
-            merged["api_key"] = payload["api_key"]
+            merged["api_key"] = encrypt_text(payload["api_key"])
             merged["api_key_masked"] = mask_api_key(payload["api_key"])
 
         updated = self.provider_repo.update(provider_id, merged, now_iso())

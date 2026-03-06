@@ -1,16 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, User, Wand2, Loader2, Image as ImageIcon, Film, X, Paperclip, Palette } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { Loader2, Palette, Wand2 } from 'lucide-react';
 import { useAppStore } from '../store';
 import * as api from '../api';
+import { getErrorMessage } from '../getErrorMessage';
+import { CandidateEditor } from './CandidateEditor';
+import { ChatInput, type PendingUploadFile } from './ChatInput';
+import { ChatMessageItem } from './ChatMessage';
 import StyleManagementDrawer from './StyleManagementDrawer';
-
-interface PendingUploadFile {
-  id: string;
-  file: File;
-  previewUrl?: string;
-}
 
 interface SendDisplayOverride {
   content: string;
@@ -56,6 +52,28 @@ function isPromptActionOption(option: string): boolean {
   return text.includes('继续优化') || text.includes('确定使用') || text.includes('确认提示词');
 }
 
+function isSaveDecisionOption(option: string): boolean {
+  const text = option.trim();
+  return text.includes('保存风格') || text.includes('暂不保存');
+}
+
+function isAllocationOption(option: string): boolean {
+  const text = option.trim();
+  return text.includes('确认分图') || text.includes('继续调整分图');
+}
+
+function resolveActionValue(option: string): string | undefined {
+  const text = option.trim();
+  if (text.includes('确定使用') || text.includes('确认提示词')) return 'confirm_prompt';
+  if (text.includes('确认资产')) return 'confirm_assets';
+  if (text.includes('确认分图')) return 'confirm_allocation_plan';
+  if (text.includes('继续调整资产')) return 'revise_assets';
+  if (text.includes('继续调整分图')) return 'revise_allocation_plan';
+  if (text.includes('保存风格')) return 'save_style';
+  if (text.includes('暂不保存')) return 'skip_save';
+  return undefined;
+}
+
 function getStageLabel(stage: api.InspirationDraft['stage'] | undefined): string {
   if (stage === 'prompt_revision') return '张数与提示词确认';
   if (stage === 'asset_confirming') return '分图确认';
@@ -67,59 +85,6 @@ function shouldRenderInlineOptions(message: api.InspirationMessage): boolean {
   const items = message.options?.items || [];
   if (!items.length) return false;
   return !items.every((item) => isBottomActionOption(item));
-}
-
-function ChatImageAttachmentCard(
-  { attachment, isUser, onPreview }: { attachment: api.InspirationAttachment; isUser: boolean; onPreview: (url: string, name: string) => void },
-) {
-  const [errorUrl, setErrorUrl] = useState<string | null>(null);
-  const loadFailed = !!attachment.preview_url && errorUrl === attachment.preview_url;
-
-  return (
-    <div
-      style={{
-        width: '160px',
-        background: isUser ? 'rgba(255,255,255,0.16)' : 'var(--bg-glass)',
-        border: '1px solid var(--border-color)',
-        borderRadius: '8px',
-        padding: '6px',
-      }}
-    >
-      {attachment.preview_url && !loadFailed ? (
-        <img
-          src={attachment.preview_url}
-          alt={attachment.name || '图片'}
-          style={{ width: '100%', height: '96px', objectFit: 'cover', borderRadius: '6px', cursor: 'zoom-in' }}
-          onClick={() => onPreview(attachment.preview_url!, attachment.name || '图片')}
-          onError={() => setErrorUrl(attachment.preview_url || null)}
-        />
-      ) : (
-        <div
-          style={{
-            width: '100%',
-            height: '96px',
-            borderRadius: '6px',
-            border: '1px dashed var(--border-color)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--text-muted)',
-            fontSize: '0.78rem',
-            gap: '6px',
-          }}
-        >
-          <ImageIcon size={14} />
-          预览失败
-        </div>
-      )}
-      <div style={{ marginTop: '6px', fontSize: '0.76rem', opacity: 0.95, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {attachment.name || '图片'}
-      </div>
-      <div style={{ marginTop: '2px', fontSize: '0.7rem', opacity: 0.82 }}>
-        {attachment.status === 'failed' ? '预览失败' : ''}
-      </div>
-    </div>
-  );
 }
 
 export default function InspirationPanel() {
@@ -262,14 +227,25 @@ export default function InspirationPanel() {
   }, [messages]);
 
   const isWaitingForSaveDecision = useMemo(() => {
+    if (agentMeta?.mode === 'langgraph') {
+      const items = draft?.options?.items || [];
+      return items.some((item) => isSaveDecisionOption(item));
+    }
     if (!draft?.locked || lastSaveDecisionMsgIndex < 0) return false;
     const hasNewAssistantAfterOptions = messages
       .slice(lastSaveDecisionMsgIndex + 1)
       .some((message) => message.role === 'assistant');
     return !hasNewAssistantAfterOptions;
-  }, [draft?.locked, lastSaveDecisionMsgIndex, messages]);
+  }, [agentMeta?.mode, draft?.locked, draft?.options?.items, lastSaveDecisionMsgIndex, messages]);
 
   const promptActionState = useMemo(() => {
+    if (agentMeta?.mode === 'langgraph') {
+      const items = draft?.options?.items || [];
+      return {
+        visible: items.some((item) => isPromptActionOption(item)),
+        allowConfirm: items.some((item) => item.includes('确定使用') || item.includes('确认提示词')),
+      };
+    }
     if (draft?.stage !== 'prompt_revision' || draft.locked) {
       return { visible: false, allowConfirm: false };
     }
@@ -287,20 +263,22 @@ export default function InspirationPanel() {
       };
     }
     return { visible: false, allowConfirm: false };
-  }, [draft?.locked, draft?.stage, messages]);
+  }, [agentMeta?.mode, draft?.locked, draft?.options?.items, draft?.stage, messages]);
+
+  const dynamicBottomOptionBlock = useMemo(() => {
+    if (agentMeta?.mode !== 'langgraph') return null;
+    const optionBlock = draft?.options;
+    if (!optionBlock?.items?.length) return null;
+    const bottomItems = optionBlock.items.filter((item) => isBottomActionOption(item));
+    if (!bottomItems.length) return null;
+    return { ...optionBlock, items: bottomItems };
+  }, [agentMeta?.mode, draft?.options]);
 
   const handleOptionClick = (event: React.MouseEvent, option: string, max: number, isLatestOption: boolean) => {
     event.stopPropagation();
     if (isLoading || !isLatestOption || draft?.locked) return;
 
-    let actionValue: string | undefined;
-    if (option.includes('确定使用') || option.includes('确认提示词')) actionValue = 'confirm_prompt';
-    if (option.includes('确认资产')) actionValue = 'confirm_assets';
-    if (option.includes('确认分图')) actionValue = 'confirm_allocation_plan';
-    if (option.includes('继续调整资产')) actionValue = 'revise_assets';
-    if (option.includes('继续调整分图')) actionValue = 'revise_allocation_plan';
-    if (option.includes('保存风格')) actionValue = 'save_style';
-    if (option.includes('暂不保存')) actionValue = 'skip_save';
+    const actionValue = resolveActionValue(option);
 
     if (max <= 1) {
       handleSend(actionValue, [option]);
@@ -429,11 +407,11 @@ export default function InspirationPanel() {
       setAgentMeta(response.agent || null);
     } catch (error) {
       if (sessionIdRef.current !== requestSessionId) return;
-      const typedError = error as { response?: { data?: { code?: string; message?: string } } };
+      const typedError = error as { response?: { data?: { code?: string } } };
       if (typedError.response?.data?.code === 'E-1010') {
         addToast('当前模型不支持图片解析，请切换为视觉模型后重试。', 'error');
       } else {
-        addToast(typedError.response?.data?.message || '请求失败，请稍后重试。', 'error');
+        addToast(getErrorMessage(error), 'error');
       }
       fetchConversation(requestSessionId);
     } finally {
@@ -447,27 +425,55 @@ export default function InspirationPanel() {
     handleSend('revise_allocation_plan', ['继续调整分图'], revisionText);
   };
 
-  const renderCandidateGroup = (title: string, field: 'foods' | 'scenes' | 'keywords') => {
-    const items = editableCandidates?.[field] || [];
+  const renderDynamicActionButtons = (optionBlock: api.StyleOptionBlock, location: 'footer' | 'allocation') => {
+    const items = optionBlock.items || [];
     if (!items.length) return null;
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-        <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{title}</div>
-        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-          {items.map((item) => (
-            <button
-              key={`${field}-${item}`}
-              type="button"
-              disabled={isLoading}
-              onClick={() => removeCandidateItem(field, item)}
-              className="btn btn-secondary"
-              style={{ padding: '2px 8px', fontSize: '0.78rem' }}
-              title="点击移除"
-            >
-              {item} <X size={12} />
-            </button>
-          ))}
+    if (optionBlock.max > 1) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div className="chat-options">
+            {items.map((option) => {
+              const isSelected = currentSelection.includes(option);
+              return (
+                <button
+                  key={`${location}-${option}`}
+                  className={`chat-option ${isSelected ? 'selected' : ''}`}
+                  disabled={isLoading || !!draft?.locked}
+                  onClick={(event) => handleOptionClick(event, option, optionBlock.max, true)}
+                >
+                  {option}
+                </button>
+              );
+            })}
+          </div>
+          <button
+            className="btn btn-primary"
+            disabled={currentSelection.length === 0 || isLoading}
+            onClick={() => handleSend(undefined, currentSelection)}
+          >
+            确认提交
+          </button>
         </div>
+      );
+    }
+    return (
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+        {items.map((option) => {
+          const primary = option.includes('确认') || option.includes('保存') || option.includes('生成');
+          const actionValue = option.includes('继续调整分图')
+            ? () => handleReviseAssets()
+            : () => handleSend(resolveActionValue(option), [option]);
+          return (
+            <button
+              key={`${location}-${option}`}
+              className={primary ? 'btn btn-primary' : 'btn btn-secondary'}
+              disabled={isLoading || !!draft?.locked}
+              onClick={actionValue}
+            >
+              {option}
+            </button>
+          );
+        })}
       </div>
     );
   };
@@ -510,28 +516,26 @@ export default function InspirationPanel() {
             </div>
           )}
           {agentMeta?.trace?.length ? (
-            <details style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-              <summary style={{ cursor: 'pointer' }}>查看 Agent 工具链</summary>
-              <div style={{ marginTop: '8px', display: 'grid', gap: '6px' }}>
-                {agentMeta.trace.map((item) => (
-                  <div
-                    key={item.id}
-                    style={{
-                      padding: '8px 10px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border-color)',
-                      background: 'rgba(255,255,255,0.03)',
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                      {item.node}
-                      {item.tool_name ? ` · ${item.tool_name}` : ''}
-                    </div>
-                    <div>{item.summary || item.decision || '无附加说明'}</div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'grid', gap: '6px' }}>
+              <div style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Agent 工具链</div>
+              {agentMeta.trace.map((item) => (
+                <div
+                  key={item.id}
+                  style={{
+                    padding: '8px 10px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border-color)',
+                    background: 'rgba(255,255,255,0.03)',
+                  }}
+                >
+                  <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                    {item.node}
+                    {item.tool_name ? ` · ${item.tool_name}` : ''}
                   </div>
-                ))}
-              </div>
-            </details>
+                  <div>{item.summary || item.decision || '无附加说明'}</div>
+                </div>
+              ))}
+            </div>
           ) : null}
         </div>
       )}
@@ -544,146 +548,71 @@ export default function InspirationPanel() {
         <div className="panel-content" style={{ display: 'flex', flexDirection: 'column', padding: '16px 20px 0 20px' }}>
           <div className="chat-container" style={{ flex: 1, overflowY: 'auto', paddingBottom: '16px', paddingRight: '12px' }} ref={chatRef}>
             {messages.map((message, index) => (
-              <div key={`${message.id}-${index}`} className={`chat-bubble ${message.role === 'user' ? 'user' : 'bot'}`}>
-                {message.role === 'assistant' || message.role === 'system' ? (
-                  <>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: 'var(--text-secondary)' }}>
-                      <Bot size={16} /> Savory Assistant
-                    </div>
-                    <div className="chat-markdown">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '8px', marginBottom: '8px', opacity: 0.9 }}>
-                      我 <User size={16} />
-                    </div>
-                    <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>
-                  </>
-                )}
-
-                {message.attachments && message.attachments.length > 0 && (
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap', justifyContent: message.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                    {message.attachments.map((attachment) => {
-                      if (attachment.type === 'image') {
-                        return (
-                          <ChatImageAttachmentCard
-                            key={attachment.id}
-                            attachment={attachment}
-                            isUser={message.role === 'user'}
-                            onPreview={openImagePreview}
-                          />
-                        );
-                      }
-                      return (
-                        <div key={attachment.id} style={{ padding: '4px 8px', background: message.role === 'user' ? 'rgba(255,255,255,0.2)' : 'var(--bg-glass)', borderRadius: '4px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          {attachment.type === 'video' && <Film size={14} />}
-                          {attachment.type === 'text' && <Paperclip size={14} />}
-                          {attachment.type === 'transcript' && <Paperclip size={14} />}
-                          {attachment.name || attachment.id}
-                          {attachment.status === 'processing' && ' (正在思考中...)'}
-                          {attachment.status === 'failed' && ' (失败)'}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {shouldRenderInlineOptions(message) ? (
-                  <div style={{ marginTop: '14px' }}>
-                    <div style={{ fontWeight: 500, marginBottom: '8px' }}>
-                      {message.options?.title} {message.options?.max && message.options.max > 1 ? `(多选，最多 ${message.options.max} 项)` : '(单选)'}
-                    </div>
-                    <div className="chat-options">
-                      {message.options?.items?.map((option) => {
-                        const isSelected = index === lastOptionMsgIndex && currentSelection.includes(option);
-                        return (
-                          <button
-                            key={option}
-                            className={`chat-option ${isSelected ? 'selected' : ''}`}
-                            disabled={isLoading || !!draft?.locked || index !== lastOptionMsgIndex}
-                            onClick={(event) => handleOptionClick(event, option, message.options?.max || 1, index === lastOptionMsgIndex)}
-                          >
-                            {option}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {message.options?.max && message.options.max > 1 && index === lastOptionMsgIndex && (
-                      <div style={{ marginTop: '10px' }}>
-                        <button
-                          className="btn btn-primary"
-                          style={{ padding: '6px 16px', fontSize: '0.85rem' }}
-                          disabled={currentSelection.length === 0 || isLoading}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleSend(undefined, currentSelection);
-                          }}
-                        >
-                          确认提交
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ) : null}
-              </div>
+              <ChatMessageItem
+                key={`${message.id}-${index}`}
+                message={message}
+                index={index}
+                currentSelection={currentSelection}
+                isLoading={isLoading}
+                isLocked={!!draft?.locked}
+                lastOptionMsgIndex={lastOptionMsgIndex}
+                shouldRenderInlineOptions={shouldRenderInlineOptions}
+                onPreview={openImagePreview}
+                onOptionClick={handleOptionClick}
+                onSubmitSelection={() => handleSend(undefined, currentSelection)}
+              />
             ))}
 
             {isLoading && (
               <div className="chat-bubble bot">
-                <Loader2 size={16} className="animate-spin" /> 正在思考中...
+                <Loader2 size={16} className="animate-spin" /> {agentMeta?.mode === 'langgraph' ? 'Agent 正在思考...' : '正在思考中...'}
               </div>
             )}
           </div>
 
           {draft?.stage === 'asset_confirming' && editableCandidates && (
-            <div style={{ marginBottom: '12px', padding: '12px', border: '1px solid var(--border-color)', borderRadius: '8px', background: 'var(--bg-glass)' }}>
-              <div style={{ fontWeight: 600, marginBottom: '8px', color: 'var(--text-primary)' }}>每张图重点内容确认（可点击标签移除误提取项）</div>
-              {(draft?.allocation_plan || []).length > 0 && (
-                <div style={{ display: 'grid', gap: '8px', marginBottom: '10px' }}>
-                  {(draft?.allocation_plan || []).map((item) => (
-                    <div
-                      key={`allocation-${item.slot_index}-${item.focus_title}`}
-                      style={{
-                        padding: '8px',
-                        borderRadius: '8px',
-                        border: '1px solid var(--border-color)',
-                        background: 'rgba(255,255,255,0.03)',
-                      }}
-                    >
-                      <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                        第{item.slot_index}张：{item.focus_title}
-                      </div>
-                      <div style={{ marginTop: '4px', fontSize: '0.82rem', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>
-                        {item.focus_description}
-                      </div>
+            <CandidateEditor
+              editableCandidates={editableCandidates}
+              allocationPlan={draft?.allocation_plan || []}
+              isLoading={isLoading}
+              onRemoveCandidateItem={removeCandidateItem}
+              actionArea={
+                agentMeta?.mode === 'langgraph' && dynamicBottomOptionBlock?.items.some((item) => isAllocationOption(item))
+                  ? renderDynamicActionButtons(
+                      { ...dynamicBottomOptionBlock, items: dynamicBottomOptionBlock.items.filter((item) => isAllocationOption(item)) },
+                      'allocation',
+                    )
+                  : (
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                      <button className="btn btn-primary" disabled={isLoading} onClick={() => handleSend('confirm_allocation_plan', ['确认分图并锁定'])}>
+                        <Wand2 size={16} /> 确认分图并锁定
+                      </button>
+                      <button className="btn btn-secondary" disabled={isLoading} onClick={handleReviseAssets}>
+                        继续调整分图
+                      </button>
                     </div>
-                  ))}
-                </div>
-              )}
-              {renderCandidateGroup('美食', 'foods')}
-              {renderCandidateGroup('景点/场景', 'scenes')}
-              {renderCandidateGroup('关键词', 'keywords')}
-              <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-                <button className="btn btn-primary" disabled={isLoading} onClick={() => handleSend('confirm_allocation_plan', ['确认分图并锁定'])}>
-                  <Wand2 size={16} /> 确认分图并锁定
-                </button>
-                <button className="btn btn-secondary" disabled={isLoading} onClick={handleReviseAssets}>
-                  继续调整分图
-                </button>
-              </div>
-            </div>
+                  )
+              }
+            />
           )}
 
           <div style={{ marginTop: '8px', borderTop: '1px solid var(--border-color)', padding: '14px 0' }}>
             <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
-              {promptActionState.visible && promptActionState.allowConfirm && (
+              {agentMeta?.mode === 'langgraph' && dynamicBottomOptionBlock
+                ? renderDynamicActionButtons(
+                    {
+                      ...dynamicBottomOptionBlock,
+                      items: dynamicBottomOptionBlock.items.filter((item) => !isAllocationOption(item)),
+                    },
+                    'footer',
+                  )
+                : null}
+              {agentMeta?.mode !== 'langgraph' && promptActionState.visible && promptActionState.allowConfirm && (
                 <button className="btn btn-primary" onClick={() => handleSend('confirm_prompt', ['确定使用'])} disabled={isLoading}>
                   <Wand2 size={16} /> 确认提示词
                 </button>
               )}
-              {isWaitingForSaveDecision && (
+              {agentMeta?.mode !== 'langgraph' && isWaitingForSaveDecision && (
                 <>
                   <button className="btn btn-primary" onClick={() => handleSend('save_style', ['保存风格'])} disabled={isLoading}>保存风格</button>
                   <button className="btn btn-secondary" onClick={() => handleSend('skip_save', ['暂不保存'])} disabled={isLoading}>暂不保存</button>
@@ -691,120 +620,23 @@ export default function InspirationPanel() {
               )}
             </div>
 
-            {pendingFiles.length > 0 && (
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
-                {pendingFiles.map((item) => (
-                  <div
-                    key={item.id}
-                    style={{
-                      width: '200px',
-                      padding: '6px 8px',
-                      background: 'var(--bg-glass)',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border-color)',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '6px',
-                    }}
-                  >
-                    {item.file.type.startsWith('image/') && item.previewUrl ? (
-                      <button
-                        type="button"
-                        onClick={() => openImagePreview(item.previewUrl!, item.file.name)}
-                        style={{
-                          width: '100%',
-                          height: '84px',
-                          padding: 0,
-                          border: 'none',
-                          borderRadius: '6px',
-                          overflow: 'hidden',
-                          background: 'transparent',
-                          cursor: 'zoom-in',
-                        }}
-                        title="点击查看大图"
-                      >
-                        <img
-                          src={item.previewUrl}
-                          alt={item.file.name}
-                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                        />
-                      </button>
-                    ) : (
-                      <div
-                        style={{
-                          width: '100%',
-                          height: '48px',
-                          borderRadius: '6px',
-                          border: '1px dashed var(--border-color)',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          color: 'var(--text-muted)',
-                        }}
-                      >
-                        {item.file.type.startsWith('video/') ? <Film size={16} /> : <ImageIcon size={16} />}
-                      </div>
-                    )}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      {item.file.type.startsWith('video/') ? <Film size={14} /> : <ImageIcon size={14} />}
-                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.82rem' }}>{item.file.name}</span>
-                      <button onClick={() => removePendingFile(item.id)} disabled={isLoading || !!draft?.locked} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 0, display: 'flex' }}>
-                        <X size={14} />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div
-              className={`input-group upload-dropzone ${isInputDragActive ? 'upload-dropzone-active' : ''}`}
-              onDragOver={handleInputDragOver}
-              onDragLeave={handleInputDragLeave}
-              onDrop={handleInputDrop}
-              style={{ borderRadius: '8px', padding: '8px' }}
-            >
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <input type="file" ref={fileInputRef} style={{ display: 'none' }} multiple accept="image/*,video/*" onChange={handleFileChange} />
-                <button className="btn btn-secondary" style={{ padding: '8px' }} title="添加附件" disabled={isLoading || !!draft?.locked} onClick={() => fileInputRef.current?.click()}>
-                  <Paperclip size={18} />
-                </button>
-                <textarea
-                  ref={inputTextRef}
-                  className="input"
-                  placeholder={draft?.locked ? '方案已锁定，可直接在右侧生成。' : '输入描述，支持同时上传文本、图片、视频（Enter发送，Shift/Ctrl+Enter换行）。'}
-                  value={inputText}
-                  disabled={isLoading || !!draft?.locked}
-                  onChange={(event) => setInputText(event.target.value)}
-                  rows={1}
-                  style={{
-                    minHeight: '42px',
-                    maxHeight: '180px',
-                    resize: 'none',
-                    overflowY: 'auto',
-                    lineHeight: 1.5,
-                  }}
-                  onKeyDown={(event) => {
-                    if (
-                      event.key === 'Enter'
-                      && !event.shiftKey
-                      && !event.ctrlKey
-                      && !event.metaKey
-                      && !event.altKey
-                    ) {
-                      event.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                />
-                <button className="btn btn-primary" disabled={(!inputText.trim() && pendingFiles.length === 0) || isLoading || !!draft?.locked} onClick={() => handleSend()}>
-                  发送
-                </button>
-              </div>
-              <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', paddingLeft: '4px' }}>
-                可直接拖拽图片或视频到输入区上传。
-              </div>
-            </div>
+            <ChatInput
+              draftLocked={!!draft?.locked}
+              isLoading={isLoading}
+              inputText={inputText}
+              pendingFiles={pendingFiles}
+              isInputDragActive={isInputDragActive}
+              fileInputRef={fileInputRef}
+              inputTextRef={inputTextRef}
+              onInputChange={setInputText}
+              onFileChange={handleFileChange}
+              onInputDragOver={handleInputDragOver}
+              onInputDragLeave={handleInputDragLeave}
+              onInputDrop={handleInputDrop}
+              onRemovePendingFile={removePendingFile}
+              onPreviewImage={openImagePreview}
+              onSend={() => handleSend()}
+            />
           </div>
         </div>
       )}

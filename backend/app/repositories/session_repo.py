@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.app.domain.models import SessionModel
 from backend.app.infra.db import Database
 
 
@@ -9,7 +10,7 @@ class SessionRepository:
     def __init__(self, db: Database):
         self.db = db
 
-    def create(self, session: dict[str, Any]) -> dict[str, Any]:
+    def create(self, session: dict[str, Any]) -> SessionModel:
         self.db.execute(
             """
             INSERT INTO session (id, title, content_mode, created_at, updated_at)
@@ -23,19 +24,20 @@ class SessionRepository:
                 session["updated_at"],
             ),
         )
-        return session
+        return SessionModel.from_dict(session)
 
-    def list_all(self) -> list[dict[str, Any]]:
-        return self.db.fetch_all(
+    def list_all(self) -> list[SessionModel]:
+        rows = self.db.fetch_all(
             """
             SELECT id, title, content_mode, created_at, updated_at
             FROM session
             ORDER BY created_at DESC
             """
         )
+        return [SessionModel.from_dict(row) for row in rows]
 
-    def get(self, session_id: str) -> dict[str, Any] | None:
-        return self.db.fetch_one(
+    def get(self, session_id: str) -> SessionModel | None:
+        row = self.db.fetch_one(
             """
             SELECT id, title, content_mode, created_at, updated_at
             FROM session
@@ -43,6 +45,7 @@ class SessionRepository:
             """,
             (session_id,),
         )
+        return SessionModel.from_dict(row) if row else None
 
     def update_session(
         self,
@@ -50,7 +53,7 @@ class SessionRepository:
         title: str,
         content_mode: str | None,
         updated_at: str,
-    ) -> dict[str, Any] | None:
+    ) -> SessionModel | None:
         found = self.get(session_id)
         if not found:
             return None

@@ -119,6 +119,23 @@ def test_image_asset_upload(client):
     assert image_asset["status"] == "ready"
     image_name = Path(image_asset["file_path"]).name
     assert image_name.endswith(".png")
+    assert not Path(image_asset["file_path"]).is_absolute()
+
+
+def test_storage_returns_relative_paths(tmp_path):
+    from backend.app.infra.storage import Storage
+
+    storage = Storage(tmp_path / "storage")
+
+    video_path = storage.save_video("demo.mp4", b"video")
+    image_path = storage.save_image("demo.png", b"image")
+    generated_path = storage.save_generated_image("demo-generated.png", b"generated")
+    export_path = storage.save_export("demo.pdf", b"pdf-bytes")
+
+    assert video_path == "videos/demo.mp4"
+    assert image_path == "images/demo.png"
+    assert generated_path == "generated/demo-generated.png"
+    assert export_path == "exports/demo.pdf"
 
 
 def test_not_found_error_codes_for_session_and_asset(client):

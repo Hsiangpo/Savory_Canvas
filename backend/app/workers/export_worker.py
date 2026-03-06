@@ -20,11 +20,13 @@ class ExportWorker:
         job_repo: JobRepository,
         result_repo: ResultRepository,
         storage: Storage,
+        font_paths: list[str] | None = None,
     ):
         self.export_repo = export_repo
         self.job_repo = job_repo
         self.result_repo = result_repo
         self.storage = storage
+        self.font_paths = list(font_paths or [])
 
     def schedule(self, export_id: str) -> None:
         threading.Thread(target=lambda: asyncio.run(self._run(export_id)), daemon=True).start()
@@ -389,7 +391,14 @@ class ExportWorker:
 
     def _load_font(self, *, size: int, bold: bool, fallback):
         candidates = [
+            *self.font_paths,
             "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/msyhbd.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
             "C:/Windows/Fonts/simhei.ttf",
             "C:/Windows/Fonts/simsun.ttc",
             "C:/Windows/Fonts/arial.ttf",

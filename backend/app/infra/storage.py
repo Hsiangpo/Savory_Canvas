@@ -13,24 +13,28 @@ class Storage:
             (self.base_dir / name).mkdir(parents=True, exist_ok=True)
 
     def save_video(self, filename: str, content: bytes) -> str:
-        path = self.base_dir / "videos" / filename
+        relative_path = Path("videos") / filename
+        path = self.base_dir / relative_path
         path.write_bytes(content)
-        return str(path)
+        return relative_path.as_posix()
 
     def save_image(self, filename: str, content: bytes) -> str:
-        path = self.base_dir / "images" / filename
+        relative_path = Path("images") / filename
+        path = self.base_dir / relative_path
         path.write_bytes(content)
-        return str(path)
+        return relative_path.as_posix()
 
     def save_generated_image(self, filename: str, content: bytes) -> str:
-        path = self.base_dir / "generated" / filename
+        relative_path = Path("generated") / filename
+        path = self.base_dir / relative_path
         path.write_bytes(content)
-        return str(path)
+        return relative_path.as_posix()
 
     def save_export(self, filename: str, content: str | bytes) -> str:
-        path = self.base_dir / "exports" / filename
+        relative_path = Path("exports") / filename
+        path = self.base_dir / relative_path
         if isinstance(content, bytes):
             path.write_bytes(content)
         else:
             path.write_text(content, encoding="utf-8")
-        return str(path)
+        return relative_path.as_posix()

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend.app.domain.enums import FINAL_JOB_STATUSES
+from backend.app.domain.models import GenerationJobModel
 from backend.app.infra.db import Database
 
 
@@ -10,7 +11,7 @@ class JobRepository:
     def __init__(self, db: Database):
         self.db = db
 
-    def create_with_initial_log(self, job: dict[str, Any], log_id: str) -> dict[str, Any]:
+    def create_with_initial_log(self, job: dict[str, Any], log_id: str) -> GenerationJobModel:
         with self.db.transaction() as conn:
             conn.execute(
                 """
@@ -49,7 +50,7 @@ class JobRepository:
                     job["created_at"],
                 ),
             )
-        return job
+        return GenerationJobModel.from_dict(job)
 
     def update_state_with_log(
         self,
@@ -92,8 +93,8 @@ class JobRepository:
                 (log_id, job_id, current_stage, stage_message, log_status or status, updated_at),
             )
 
-    def get(self, job_id: str) -> dict[str, Any] | None:
-        return self.db.fetch_one(
+    def get(self, job_id: str) -> GenerationJobModel | None:
+        row = self.db.fetch_one(
             """
             SELECT id, session_id, style_profile_id, image_count,
                    status, progress_percent, current_stage, stage_message,
@@ -103,9 +104,10 @@ class JobRepository:
             """,
             (job_id,),
         )
+        return GenerationJobModel.from_dict(row) if row else None
 
-    def list_by_session(self, session_id: str) -> list[dict[str, Any]]:
-        return self.db.fetch_all(
+    def list_by_session(self, session_id: str) -> list[GenerationJobModel]:
+        rows = self.db.fetch_all(
             """
             SELECT id, session_id, style_profile_id, image_count,
                    status, progress_percent, current_stage, stage_message,
@@ -116,8 +118,9 @@ class JobRepository:
             """,
             (session_id,),
         )
+        return [GenerationJobModel.from_dict(row) for row in rows]
 
-    def cancel(self, job_id: str, updated_at: str, log_id: str) -> dict[str, Any] | None:
+    def cancel(self, job_id: str, updated_at: str, log_id: str) -> GenerationJobModel | None:
         job = self.get(job_id)
         if not job:
             return None

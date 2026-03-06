@@ -30,10 +30,10 @@ class SessionService:
             "created_at": now,
             "updated_at": now,
         }
-        return self.session_repo.create(session)
+        return self.session_repo.create(session).to_dict()
 
     def list_sessions(self) -> list[dict]:
-        return self.session_repo.list_all()
+        return [session.to_dict() for session in self.session_repo.list_all()]
 
     def rename_session(self, session_id: str, title: str, content_mode: str | None = None) -> dict:
         updated = self.session_repo.update_session(
@@ -44,7 +44,7 @@ class SessionService:
         )
         if not updated:
             raise not_found("会话", session_id)
-        return updated
+        return updated.to_dict()
 
     def delete_session(self, session_id: str) -> bool:
         deleted = self.session_repo.delete_session(session_id)
@@ -57,9 +57,9 @@ class SessionService:
         if not session:
             raise not_found("会话", session_id)
         return {
-            "session": session,
+            "session": session.to_dict(),
             "assets": self.asset_repo.list_by_session(session_id),
-            "jobs": self.job_repo.list_by_session(session_id),
+            "jobs": [job.to_dict() for job in self.job_repo.list_by_session(session_id)],
             "exports": self.export_repo.list_by_session(session_id),
         }
 

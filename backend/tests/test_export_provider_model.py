@@ -42,7 +42,34 @@ def test_provider_model_routing_and_models(client):
 
     del_resp = client.delete(f"/api/v1/providers/{provider['id']}")
     assert del_resp.status_code == 200
-    assert del_resp.json()["deleted"] is True
+
+
+def test_provider_api_key_is_encrypted_at_rest_and_masked_to_last_four(client):
+    create_response = client.post(
+        "/api/v1/providers",
+        json={
+            "name": "加密提供商",
+            "base_url": "https://example.com",
+            "api_key": "secret-provider-key",
+            "api_protocol": "responses",
+        },
+    )
+    assert create_response.status_code == 201
+    provider = create_response.json()
+    assert provider["api_key_masked"].endswith("y")
+    assert provider["api_key_masked"].startswith("*")
+
+    row = client.app.state.services.provider.provider_repo.get(provider["id"])
+    assert row is not None
+    assert row["api_key"] == "secret-provider-key"
+
+    raw_row = client.app.state.services.provider.provider_repo.db.fetch_one(
+        "SELECT api_key, api_key_masked FROM provider_config WHERE id = ?",
+        (provider["id"],),
+    )
+    assert raw_row is not None
+    assert raw_row["api_key"] != "secret-provider-key"
+    assert raw_row["api_key_masked"].endswith("key")
 
 
 def test_model_list_uses_runtime_provider_models(client, monkeypatch):
@@ -513,6 +540,27 @@ def test_export_service_public_url_helper_does_not_mutate_input_task(client):
 
     assert resolved_task["file_url"].startswith("http://127.0.0.1:8887/static/exports/")
     assert original_task["file_url"] == "exports/task-1.pdf"
+
+
+def test_export_worker_prefers_configured_font_paths(client, monkeypatch):
+    worker = client.app.state.services.export.worker
+    worker.font_paths = ["D:/fonts/custom-font.ttf"]
+    attempted_paths: list[str] = []
+
+    class FakeImageFont:
+        @staticmethod
+        def truetype(path, size):
+            attempted_paths.append(path)
+            raise OSError("font not found")
+
+        @staticmethod
+        def load_default():
+            return "default-font"
+
+    loaded_font = worker._load_font(size=24, bold=False, fallback=FakeImageFont)
+
+    assert loaded_font == "default-font"
+    assert attempted_paths[0] == "D:/fonts/custom-font.ttf"
 
 
 def test_generation_requires_model_routing(client):

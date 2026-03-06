@@ -104,10 +104,11 @@ export interface InspirationMessage {
 
 export interface InspirationDraft {
   stage: 'style_collecting' | 'prompt_revision' | 'asset_confirming' | 'locked';
-  style_payload?: StylePayload | Record<string, unknown>;
+  style_payload?: StylePayload | null;
   image_count?: number;
   draft_style_id?: string;
   allocation_plan?: InspirationAllocationPlanItem[];
+  options?: StyleOptionBlock | null;
   locked: boolean;
 }
 

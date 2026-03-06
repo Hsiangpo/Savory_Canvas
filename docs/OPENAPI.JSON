@@ -1698,6 +1698,16 @@
               "$ref": "#/components/schemas/InspirationAllocationPlanItem"
             }
           },
+          "options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StyleOptionBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "locked": {
             "type": "boolean"
           }

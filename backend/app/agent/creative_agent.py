@@ -11,7 +11,10 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langgraph.graph import END, START, StateGraph
 
+from backend.app.core.prompt_loader import load_prompt
 from backend.app.core.utils import new_id, now_iso
+
+MAX_AGENT_TOOL_CALLS = 5
 
 
 class CreativeAgentState(TypedDict, total=False):
@@ -22,6 +25,7 @@ class CreativeAgentState(TypedDict, total=False):
     result: dict[str, Any]
     agent_messages: list[BaseMessage]
     trace: list[dict[str, Any]]
+    tool_call_count: int
 
 
 @dataclass
@@ -55,7 +59,7 @@ class CreativeAgent:
         workflow.add_node("tool_node", self._tool_node)
         workflow.add_edge(START, "agent_node")
         workflow.add_conditional_edges("agent_node", self._should_continue, ["tool_node", END])
-        workflow.add_edge("tool_node", END)
+        workflow.add_conditional_edges("tool_node", self._after_tool, ["agent_node", END])
         self._graph = workflow.compile()
         self._runnable = RunnableWithMessageHistory(
             RunnableLambda(self._invoke_graph),
@@ -65,7 +69,7 @@ class CreativeAgent:
             output_messages_key="agent_messages",
         )
 
-    def respond(self, request: dict[str, Any]) -> CreativeAgentTurn:
+    def respond(self, request: dict[str, Any]) -> dict[str, Any]:
         response = self._runnable.invoke(
             {
                 "request": request,
@@ -73,24 +77,16 @@ class CreativeAgent:
             },
             config={"configurable": {"session_id": request["session_id"]}},
         )
-        result = response.get("result") or {}
-        return CreativeAgentTurn(
-            reply=str(result.get("reply") or "").strip(),
-            stage=result.get("stage", "style_collecting"),
-            options=result.get("options"),
-            style_payload=result.get("style_payload"),
-            style_prompt=result.get("style_prompt"),
-            image_count=result.get("image_count"),
-            asset_candidates=result.get("asset_candidates"),
-            allocation_plan=result.get("allocation_plan") or [],
-            locked=bool(result.get("locked")),
-            draft_style_id=result.get("draft_style_id"),
-            requirement_ready=result.get("requirement_ready"),
-            prompt_confirmable=result.get("prompt_confirmable"),
-            dynamic_stage=result.get("dynamic_stage"),
-            dynamic_stage_label=result.get("dynamic_stage_label"),
-            trace=result.get("trace") or [],
-        )
+        result = dict(response.get("result") or {})
+        if "reply" in result and isinstance(result.get("reply"), str):
+            result["reply"] = result["reply"].strip()
+        decision = response.get("decision") or {}
+        if "dynamic_stage" not in result and decision.get("dynamic_stage") is not None:
+            result["dynamic_stage"] = decision.get("dynamic_stage")
+        if "dynamic_stage_label" not in result and decision.get("dynamic_stage_label") is not None:
+            result["dynamic_stage_label"] = decision.get("dynamic_stage_label")
+        result["trace"] = response.get("trace") or []
+        return result
 
     def _invoke_graph(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._graph.invoke(payload)
@@ -101,10 +97,11 @@ class CreativeAgent:
 
     def _agent_node(self, state: CreativeAgentState) -> dict[str, Any]:
         model = self.llm_provider.build_chat_model()
+        request = state.get("request") or {}
         messages = [
             SystemMessage(content=self._build_system_prompt()),
             *state.get("history_messages", []),
-            *state.get("input_messages", []),
+            HumanMessage(content=self._build_input_summary(request)),
         ]
         response = model.invoke(messages)
         decision = self._parse_decision(response.content)
@@ -159,10 +156,13 @@ class CreativeAgent:
             tool_result=tool_result,
             trace=trace,
         )
+        updated_request = self._merge_result_into_request(request, tool_name, result)
         return {
+            "request": updated_request,
             "result": result,
             "agent_messages": [AIMessage(content=result.get("reply", ""))],
             "trace": trace,
+            "tool_call_count": int(state.get("tool_call_count") or 0) + 1,
         }
 
     def _should_continue(self, state: CreativeAgentState) -> Literal["tool_node", "__end__"]:
@@ -171,29 +171,38 @@ class CreativeAgent:
             return "tool_node"
         return END
 
+    def _after_tool(self, state: CreativeAgentState) -> Literal["agent_node", "__end__"]:
+        if int(state.get("tool_call_count") or 0) >= MAX_AGENT_TOOL_CALLS:
+            return END
+        return "agent_node"
+
     def _build_system_prompt(self) -> str:
-        return (
-            "你是 Savory Canvas 的灵感创作 Agent。\n"
-            "你必须在以下决策中二选一：\n"
-            "1. respond_directly：无需工具即可直接给出兼容旧契约的结果。\n"
-            "2. use_tool：选择一个工具继续处理。\n"
-            "输出严格 JSON，结构为："
-            '{"decision":"respond_directly|use_tool","reason":"","tool_name":"","tool_args":{},"dynamic_stage":"","dynamic_stage_label":"","result":null}。\n'
-            "如果使用工具，tool_name 必须来自已知工具。\n"
-            "如果直接回复，result 中必须包含 reply、stage、locked 字段。"
-        )
+        return load_prompt("agent/creative_agent_system_prompt.txt")
 
     def _build_input_summary(self, request: dict[str, Any]) -> str:
         state = request.get("state") or {}
         attachments = request.get("attachments") or []
+        style_payload = state.get("style_payload") or {}
+        asset_candidates = state.get("asset_candidates") or {}
+        allocation_plan = state.get("allocation_plan") or []
+        last_tool_name = request.get("last_tool_name") or ""
+        last_tool_result = request.get("last_tool_result") or {}
         return (
             f"session_id={request.get('session_id')}\n"
+            f"content_mode={request.get('content_mode') or state.get('content_mode') or ''}\n"
             f"stage={state.get('stage', 'style_collecting')}\n"
             f"action={request.get('action') or 'continue'}\n"
             f"text={request.get('text') or ''}\n"
             f"selected_items={request.get('selected_items') or []}\n"
-            f"attachments={attachments}\n"
-            "请判断当前最合适的下一步。"
+            f"style_payload={json.dumps(style_payload, ensure_ascii=False)}\n"
+            f"style_prompt={state.get('style_prompt') or ''}\n"
+            f"asset_candidates={json.dumps(asset_candidates, ensure_ascii=False)}\n"
+            f"allocation_plan={json.dumps(allocation_plan, ensure_ascii=False)}\n"
+            f"image_count={state.get('image_count')}\n"
+            f"last_tool_name={last_tool_name}\n"
+            f"last_tool_result={json.dumps(last_tool_result, ensure_ascii=False)}\n"
+            f"attachments={json.dumps(attachments, ensure_ascii=False)}\n"
+            "请判断当前最合适的下一步，并优先使用工具推进创作流程。"
         )
 
     def _parse_decision(self, content: str) -> dict[str, Any]:
@@ -239,8 +248,67 @@ class CreativeAgent:
                 "dynamic_stage_label": dynamic_stage_label,
                 "trace": trace,
             }
-        # TODO: 补齐 extract_assets / generate_style_prompt / allocate_assets_to_images /
-        # generate_images / generate_copy 等工具的结果映射，当前骨架阶段先走兼容兜底。
+        if tool_name == "extract_assets":
+            tool_payload = tool_result if isinstance(tool_result, dict) else {}
+            return {
+                "reply": "已提取当前素材重点，继续为你整理分图方案。",
+                "stage": "asset_confirming",
+                "locked": False,
+                "asset_candidates": tool_payload,
+                "dynamic_stage": dynamic_stage,
+                "dynamic_stage_label": dynamic_stage_label,
+                "trace": trace,
+            }
+        if tool_name == "generate_style_prompt":
+            tool_payload = tool_result if isinstance(tool_result, dict) else {}
+            return {
+                "reply": "已生成提示词草案，请确认或继续补充。",
+                "stage": "prompt_revision",
+                "locked": False,
+                "style_prompt": tool_payload.get("style_prompt"),
+                "image_count": tool_payload.get("image_count"),
+                "prompt_confirmable": True,
+                "options": {"title": "请选择下一步", "items": ["确认提示词", "继续优化提示词"], "max": 1},
+                "dynamic_stage": dynamic_stage,
+                "dynamic_stage_label": dynamic_stage_label,
+                "trace": trace,
+            }
+        if tool_name == "allocate_assets_to_images":
+            plan = tool_result if isinstance(tool_result, list) else []
+            return {
+                "reply": "已生成分图安排，请确认是否锁定。",
+                "stage": "asset_confirming",
+                "locked": False,
+                "allocation_plan": plan,
+                "options": {"title": "请选择下一步", "items": ["确认分图并锁定", "继续调整分图"], "max": 1},
+                "dynamic_stage": dynamic_stage,
+                "dynamic_stage_label": dynamic_stage_label,
+                "trace": trace,
+            }
+        if tool_name == "generate_images":
+            tool_payload = tool_result if isinstance(tool_result, dict) else {}
+            return {
+                "reply": "已创建图片生成任务，请在右侧查看进度。",
+                "stage": "locked",
+                "locked": True,
+                "job_id": tool_payload.get("job_id"),
+                "status": tool_payload.get("status"),
+                "dynamic_stage": dynamic_stage,
+                "dynamic_stage_label": dynamic_stage_label,
+                "trace": trace,
+            }
+        if tool_name == "generate_copy":
+            tool_payload = tool_result if isinstance(tool_result, dict) else {}
+            return {
+                "reply": "已创建文案生成任务，请等待任务完成。",
+                "stage": state.get("stage", "locked"),
+                "locked": bool(state.get("locked")),
+                "job_id": tool_payload.get("job_id"),
+                "status": tool_payload.get("status"),
+                "dynamic_stage": dynamic_stage,
+                "dynamic_stage_label": dynamic_stage_label,
+                "trace": trace,
+            }
         return {
             "reply": "Agent 已执行工具，但当前结果仍需要人工确认。",
             "stage": state.get("stage", "style_collecting"),
@@ -249,3 +317,25 @@ class CreativeAgent:
             "dynamic_stage_label": dynamic_stage_label,
             "trace": trace,
         }
+
+    def _merge_result_into_request(self, request: dict[str, Any], tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+        state = dict(request.get("state") or {})
+        for key in (
+            "stage",
+            "locked",
+            "style_payload",
+            "style_prompt",
+            "image_count",
+            "asset_candidates",
+            "allocation_plan",
+            "draft_style_id",
+            "requirement_ready",
+            "prompt_confirmable",
+        ):
+            if key in result and result.get(key) is not None:
+                state[key] = result.get(key)
+        merged_request = {**request}
+        merged_request["state"] = state
+        merged_request["last_tool_name"] = tool_name
+        merged_request["last_tool_result"] = result
+        return merged_request

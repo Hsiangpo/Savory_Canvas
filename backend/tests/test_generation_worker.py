@@ -92,7 +92,8 @@ def test_generation_copy_result_respects_content_mode(
     assert "{'" not in prompt_text
 
 
-def test_generation_copy_prefers_model_output_when_available(client, monkeypatch):
+@pytest.mark.real_copy_model
+def test_generation_copy_prefers_model_output_when_available_with_real_copy_model_marker(client, monkeypatch):
     provider_response = client.post(
         "/api/v1/providers",
         json={

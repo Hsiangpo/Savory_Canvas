@@ -122,7 +122,7 @@ def client(tmp_path, monkeypatch, request):
     monkeypatch.setattr(StyleService, "_call_text_model_with_images", fake_call_text_model_with_images)
     if not request.node.get_closest_marker("image_pipeline_real"):
         monkeypatch.setattr(GenerationWorker, "_generate_image_binary", fake_generate_image_binary)
-    if request.node.name != "test_generation_copy_prefers_model_output_when_available":
+    if not request.node.get_closest_marker("real_copy_model"):
         monkeypatch.setattr(GenerationWorker, "_call_text_model_for_copy", fake_call_text_model_for_copy)
 
     from backend.app.main import create_app

@@ -14,6 +14,7 @@ from backend.app.agent import AgentLLMProvider, CreativeAgent
 from backend.app.agent.tools import build_creative_tools
 from backend.app.api.router import api_router
 from backend.app.core.errors import DomainError
+from backend.app.core.logging_config import configure_logging, install_request_id_filter, request_id_middleware
 from backend.app.core.settings import load_settings
 from backend.app.infra.db import Database
 from backend.app.infra.storage import Storage
@@ -80,6 +81,8 @@ def _extract_cli_host(default_host: str) -> str:
 
 def create_app() -> FastAPI:
     _ensure_utf8_stdio()
+    configure_logging()
+    install_request_id_filter()
     settings = load_settings()
     legacy_inspiration_mode = _is_legacy_inspiration_mode()
 
@@ -118,6 +121,7 @@ def create_app() -> FastAPI:
         job_repo=job_repo,
         result_repo=result_repo,
         storage=storage,
+        font_paths=list(settings.export_font_paths),
     )
 
     transcript_service = TranscriptService(
@@ -194,6 +198,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         allow_credentials=False,
     )
+    app.middleware("http")(request_id_middleware)
     app.mount("/static", StaticFiles(directory=str(storage.base_dir)), name="static")
     app.include_router(api_router)
 

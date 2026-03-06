@@ -140,6 +140,7 @@ class InspirationDraft(BaseModel):
     image_count: int | None = Field(default=None, ge=1, le=10)
     draft_style_id: str | None = None
     allocation_plan: list[InspirationAllocationPlanItem] = Field(default_factory=list)
+    options: StyleOptionBlock | None = None
     locked: bool
 
 

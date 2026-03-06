@@ -2,12 +2,24 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.app.core.secrets import decrypt_text
 from backend.app.infra.db import Database
 
 
 class ProviderRepository:
     def __init__(self, db: Database):
         self.db = db
+
+    def _get_raw(self, provider_id: str) -> dict[str, Any] | None:
+        return self.db.fetch_one(
+            """
+            SELECT id, name, base_url, api_key, api_key_masked,
+                   api_protocol, enabled, created_at, updated_at
+            FROM provider_config
+            WHERE id = ?
+            """,
+            (provider_id,),
+        )
 
     def create(self, provider: dict[str, Any]) -> dict[str, Any]:
         self.db.execute(
@@ -32,17 +44,10 @@ class ProviderRepository:
         return provider
 
     def get(self, provider_id: str) -> dict[str, Any] | None:
-        row = self.db.fetch_one(
-            """
-            SELECT id, name, base_url, api_key, api_key_masked,
-                   api_protocol, enabled, created_at, updated_at
-            FROM provider_config
-            WHERE id = ?
-            """,
-            (provider_id,),
-        )
+        row = self._get_raw(provider_id)
         if row:
             row["enabled"] = bool(row["enabled"])
+            row["api_key"] = decrypt_text(row["api_key"])
         return row
 
     def list_all(self) -> list[dict[str, Any]]:
@@ -56,10 +61,11 @@ class ProviderRepository:
         )
         for row in rows:
             row["enabled"] = bool(row["enabled"])
+            row["api_key"] = decrypt_text(row["api_key"])
         return rows
 
     def update(self, provider_id: str, fields: dict[str, Any], updated_at: str) -> dict[str, Any] | None:
-        provider = self.get(provider_id)
+        provider = self._get_raw(provider_id)
         if not provider:
             return None
         merged = {

@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import UploadFile
 
-from backend.app.agent import CreativeAgent, CreativeAgentTurn
+from backend.app.agent import CreativeAgent
 from backend.app.core.errors import DomainError, not_found
 from backend.app.core.utils import new_id, now_iso
 from backend.app.infra.storage import Storage
@@ -121,14 +121,6 @@ class InspirationService(InspirationFlowMixin):
             fallback_used=False,
         )
 
-        if state["locked"]:
-            self._handle_locked_stage(session, state, normalized_items, normalized_action)
-            return self._build_response(session_id, state)
-
-        if normalized_action == "use_style_profile":
-            self._handle_use_style_profile(session, state, normalized_text, normalized_items)
-            return self._build_response(session_id, state)
-
         if self.agent_mode == "langgraph":
             try:
                 agent_turn = self._run_agent_turn(
@@ -145,6 +137,14 @@ class InspirationService(InspirationFlowMixin):
             else:
                 self._apply_agent_turn(session_id=session_id, state=state, turn=agent_turn)
                 return self._build_response(session_id, state)
+
+        if state["locked"]:
+            self._handle_locked_stage(session, state, normalized_items, normalized_action)
+            return self._build_response(session_id, state)
+
+        if normalized_action == "use_style_profile":
+            self._handle_use_style_profile(session, state, normalized_text, normalized_items)
+            return self._build_response(session_id, state)
 
         stage = state.get("stage", "style_collecting")
         if stage == "prompt_revision":
@@ -173,7 +173,7 @@ class InspirationService(InspirationFlowMixin):
         selected_items: list[str],
         action: str | None,
         attachments: list[dict[str, Any]],
-    ) -> CreativeAgentTurn | dict[str, Any]:
+    ) -> dict[str, Any]:
         if not self.creative_agent:
             raise DomainError(code="E-1006", message="Agent 模式尚未初始化", status_code=503)
         request_payload = {
@@ -182,11 +182,14 @@ class InspirationService(InspirationFlowMixin):
             "selected_items": selected_items,
             "action": action,
             "attachments": attachments,
+            "content_mode": session.get("content_mode"),
             "state": {
                 "stage": state.get("stage", "style_collecting"),
                 "locked": bool(state.get("locked")),
+                "content_mode": session.get("content_mode"),
                 "style_payload": self._build_style_payload(state),
                 "style_prompt": str(state.get("style_prompt") or ""),
+                "asset_candidates": state.get("asset_candidates") if isinstance(state.get("asset_candidates"), dict) else {},
                 "image_count": state.get("image_count"),
                 "allocation_plan": state.get("allocation_plan") if isinstance(state.get("allocation_plan"), list) else [],
             },
@@ -202,27 +205,29 @@ class InspirationService(InspirationFlowMixin):
         *,
         session_id: str,
         state: dict[str, Any],
-        turn: CreativeAgentTurn | dict[str, Any],
+        turn: dict[str, Any],
     ) -> None:
-        turn_payload = turn if isinstance(turn, dict) else turn.__dict__
-        if turn_payload.get("style_payload") is not None:
+        turn_payload = dict(turn)
+        if "style_payload" in turn_payload and turn_payload.get("style_payload") is not None:
             state["style_payload"] = self.style_service._normalize_style_payload(turn_payload["style_payload"])
-        if turn_payload.get("style_prompt") is not None:
+        if "style_prompt" in turn_payload and turn_payload.get("style_prompt") is not None:
             state["style_prompt"] = str(turn_payload.get("style_prompt") or "").strip()
-        if turn_payload.get("image_count") is not None:
+        if "image_count" in turn_payload and turn_payload.get("image_count") is not None:
             state["image_count"] = turn_payload.get("image_count")
-        if turn_payload.get("asset_candidates") is not None:
+        if "asset_candidates" in turn_payload and turn_payload.get("asset_candidates") is not None:
             state["asset_candidates"] = turn_payload.get("asset_candidates") or {}
-        if isinstance(turn_payload.get("allocation_plan"), list):
+        if "allocation_plan" in turn_payload and isinstance(turn_payload.get("allocation_plan"), list):
             state["allocation_plan"] = turn_payload.get("allocation_plan") or []
-        if turn_payload.get("draft_style_id") is not None:
+        if "draft_style_id" in turn_payload and turn_payload.get("draft_style_id") is not None:
             state["draft_style_id"] = turn_payload.get("draft_style_id")
-        if turn_payload.get("requirement_ready") is not None:
+        if "requirement_ready" in turn_payload and turn_payload.get("requirement_ready") is not None:
             state["requirement_ready"] = bool(turn_payload.get("requirement_ready"))
-        if turn_payload.get("prompt_confirmable") is not None:
+        if "prompt_confirmable" in turn_payload and turn_payload.get("prompt_confirmable") is not None:
             state["prompt_confirmable"] = bool(turn_payload.get("prompt_confirmable"))
-        state["stage"] = str(turn_payload.get("stage") or state.get("stage") or "style_collecting")
-        state["locked"] = bool(turn_payload.get("locked", state.get("locked")))
+        if "stage" in turn_payload and turn_payload.get("stage") is not None:
+            state["stage"] = str(turn_payload.get("stage") or state.get("stage") or "style_collecting")
+        if "locked" in turn_payload and turn_payload.get("locked") is not None:
+            state["locked"] = bool(turn_payload["locked"])
         state["updated_at"] = now_iso()
         self.inspiration_repo.upsert_state(state)
         reply_text = str(turn_payload.get("reply") or "").strip() or "Agent 已处理当前请求。"

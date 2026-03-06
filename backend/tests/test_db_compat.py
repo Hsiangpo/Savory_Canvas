@@ -52,6 +52,9 @@ def test_initialize_adds_missing_columns_for_legacy_inspiration_tables(tmp_path)
     assert "style_context" in message_columns
     assert "asset_candidates" in state_columns
     assert "transcript_seen_ids" in state_columns
+    assert "progress" in state_columns
+    assert "progress_label" in state_columns
+    assert "active_job_id" in state_columns
 
 
 def test_connect_enables_wal_busy_timeout_and_normal_synchronous(tmp_path):

@@ -76,7 +76,7 @@ class InspirationFlowMixin(
         return self.inspiration_repo.upsert_state(
             {
                 "session_id": session_id,
-                "stage": "style_collecting",
+                "stage": "initial_understanding",
                 "style_stage": "painting_style",
                 "locked": False,
                 "image_count": None,
@@ -88,9 +88,33 @@ class InspirationFlowMixin(
                 "requirement_ready": True,
                 "prompt_confirmable": False,
                 "transcript_seen_ids": [],
+                "progress": 10,
+                "progress_label": "初始了解",
+                "active_job_id": None,
                 "updated_at": now_iso(),
             }
         )
+
+    def _ensure_draft_style_profile(self, session: dict[str, Any], state: dict[str, Any]) -> str:
+        draft_style_id = str(state.get("draft_style_id") or "").strip()
+        style_payload = self._build_style_payload(state)
+        now = now_iso()
+        if draft_style_id and self.style_repo.get(draft_style_id):
+            self.style_repo.update_payload(draft_style_id, style_payload, now)
+            return draft_style_id
+        created = self.style_repo.create(
+            {
+                "id": new_id(),
+                "session_id": session["id"],
+                "name": "灵感草稿",
+                "style_payload": style_payload,
+                "is_builtin": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        state["draft_style_id"] = created["id"]
+        return created["id"]
 
     def _ensure_welcome_message(self, session_id: str, state: dict[str, Any]) -> None:
         if self.inspiration_repo.list_messages(session_id):
@@ -283,20 +307,23 @@ class InspirationFlowMixin(
             agent_meta = build_agent_meta(session_id, state)
         latest_options = None
         for message in reversed(messages):
-            options = message.get("options")
-            if isinstance(options, dict):
-                latest_options = options
-                break
+            if message.get("role") not in {"assistant", "system"}:
+                continue
+            latest_options = message.get("options") if isinstance(message.get("options"), dict) else None
+            break
         return {
             "session_id": session_id,
             "messages": messages,
             "draft": {
-                "stage": state.get("stage", "style_collecting"),
+                "stage": state.get("stage", "initial_understanding"),
                 "style_payload": self._build_style_payload(state),
                 "image_count": state.get("image_count"),
                 "draft_style_id": state.get("draft_style_id"),
                 "allocation_plan": state.get("allocation_plan") if isinstance(state.get("allocation_plan"), list) else [],
                 "options": latest_options,
+                "progress": state.get("progress"),
+                "progress_label": state.get("progress_label"),
+                "active_job_id": state.get("active_job_id"),
                 "locked": bool(state.get("locked")),
             },
             "agent": agent_meta,

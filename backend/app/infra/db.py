@@ -34,6 +34,9 @@ class Database:
                 ("draft_style_id", "TEXT"),
                 ("requirement_ready", "INTEGER NOT NULL DEFAULT 1"),
                 ("transcript_seen_ids", "TEXT NOT NULL DEFAULT '[]'"),
+                ("progress", "INTEGER"),
+                ("progress_label", "TEXT"),
+                ("active_job_id", "TEXT"),
                 ("updated_at", "TEXT NOT NULL DEFAULT ''"),
             ],
             "inspiration_message": [

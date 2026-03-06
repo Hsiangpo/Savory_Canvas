@@ -43,6 +43,15 @@ export interface StyleOptionBlock {
   max: number;
 }
 
+export interface AgentOption {
+  label: string;
+  action_hint?: string | null;
+}
+
+export interface AgentOptionBlock {
+  items: AgentOption[];
+}
+
 export interface StyleChatResponse {
   reply: string;
   options: StyleOptionBlock;
@@ -94,7 +103,7 @@ export interface InspirationMessage {
   id: string;
   role: 'assistant' | 'user' | 'system';
   content: string;
-  options?: StyleOptionBlock | null;
+  options?: AgentOptionBlock | null;
   fallback_used?: boolean;
   attachments?: InspirationAttachment[];
   asset_candidates?: InspirationAssetCandidates;
@@ -103,12 +112,15 @@ export interface InspirationMessage {
 }
 
 export interface InspirationDraft {
-  stage: 'style_collecting' | 'prompt_revision' | 'asset_confirming' | 'locked';
+  stage: string;
   style_payload?: StylePayload | null;
   image_count?: number;
   draft_style_id?: string;
   allocation_plan?: InspirationAllocationPlanItem[];
-  options?: StyleOptionBlock | null;
+  options?: AgentOptionBlock | null;
+  progress?: number | null;
+  progress_label?: string | null;
+  active_job_id?: string | null;
   locked: boolean;
 }
 

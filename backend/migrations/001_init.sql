@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS inspiration_state (
   draft_style_id TEXT,
   requirement_ready INTEGER NOT NULL DEFAULT 1,
   transcript_seen_ids TEXT NOT NULL,
+  progress INTEGER,
+  progress_label TEXT,
+  active_job_id TEXT,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE,
   FOREIGN KEY (draft_style_id) REFERENCES style_profile(id) ON DELETE SET NULL

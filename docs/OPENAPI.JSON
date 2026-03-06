@@ -255,17 +255,7 @@
                   },
                   "action": {
                     "type": "string",
-                    "enum": [
-                      "continue",
-                      "confirm_prompt",
-                      "confirm_allocation_plan",
-                      "confirm_assets",
-                      "revise_allocation_plan",
-                      "revise_assets",
-                      "use_style_profile",
-                      "save_style",
-                      "skip_save"
-                    ]
+                    "description": "Agent 语义动作标签。允许任意字符串；前端通常回传 options.items[].action_hint。"
                   },
                   "image_usages": {
                     "type": "array",
@@ -1513,9 +1503,10 @@
             "type": "string"
           },
           "options": {
+            "description": "本条对话消息对应的 Agent 动态选项。为空表示本轮仅展示回复、不提供按钮。",
             "anyOf": [
               {
-                "$ref": "#/components/schemas/StyleOptionBlock"
+                "$ref": "#/components/schemas/AgentOptionBlock"
               },
               {
                 "type": "null"
@@ -1673,12 +1664,7 @@
         "properties": {
           "stage": {
             "type": "string",
-            "enum": [
-              "style_collecting",
-              "prompt_revision",
-              "asset_confirming",
-              "locked"
-            ]
+            "description": "Agent 自定义的当前阶段标识，不再限制为固定枚举。"
           },
           "style_payload": {
             "$ref": "#/components/schemas/StylePayload"
@@ -1698,14 +1684,29 @@
             }
           },
           "options": {
+            "description": "当前草稿可执行的动态选项。前端应原样渲染，并将 label + action_hint 回传给后端。",
             "anyOf": [
               {
-                "$ref": "#/components/schemas/StyleOptionBlock"
+                "$ref": "#/components/schemas/AgentOptionBlock"
               },
               {
                 "type": "null"
               }
             ]
+          },
+          "progress": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Agent 返回的创作进度，范围 0-100。"
+          },
+          "progress_label": {
+            "type": "string",
+            "description": "当前进度对应的自然语言说明，例如“分图预览”“生成已启动”。"
+          },
+          "active_job_id": {
+            "type": "string",
+            "description": "当 Agent 自动触发生成后返回的当前任务 ID。前端可据此自动同步右侧任务面板。"
           },
           "locked": {
             "type": "boolean"
@@ -1802,6 +1803,37 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          }
+        }
+      },
+      "AgentOption": {
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "用户看到的按钮文案，应为具体、有引导性的中文。"
+          },
+          "action_hint": {
+            "type": "string",
+            "description": "语义动作标签。用于前端点击后回传给后端，不要求固定枚举。"
+          }
+        }
+      },
+      "AgentOptionBlock": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "description": "Agent 动态给出的可选操作列表。",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentOption"
             }
           }
         }

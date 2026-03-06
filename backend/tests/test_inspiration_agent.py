@@ -1,11 +1,45 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 from conftest import create_session, create_style, setup_model_routing
+
+
+@dataclass
+class _FakeChatResponse:
+    content: str
+
+
+class _FakeChatModel:
+    def __init__(self, decisions: list[dict[str, Any]]):
+        self._decisions = list(decisions)
+        self.calls: list[list[Any]] = []
+
+    def invoke(self, messages: list[Any]) -> _FakeChatResponse:
+        self.calls.append(messages)
+        index = len(self.calls) - 1
+        return _FakeChatResponse(content=json.dumps(self._decisions[index], ensure_ascii=False))
+
+
+class _FakeLLMProvider:
+    def __init__(self, decisions: list[dict[str, Any]]):
+        self.model = _FakeChatModel(decisions)
+
+    def build_chat_model(self) -> _FakeChatModel:
+        return self.model
+
+
+class _ToolStub:
+    def __init__(self, fn):
+        self._fn = fn
+
+    def invoke(self, args: dict[str, Any]) -> Any:
+        return self._fn(args)
 
 
 def test_create_app_ignores_legacy_cli_flag_and_always_initializes_agent(tmp_path, monkeypatch):
@@ -45,55 +79,42 @@ def test_get_inspiration_conversation_includes_agent_meta_by_default(client):
     assert body["agent"]["trace"] == []
 
 
-def test_inspiration_message_returns_langgraph_agent_meta_when_agent_succeeds(client, monkeypatch):
+def test_inspiration_message_route_accepts_freeform_action_hint_and_dynamic_options(client, monkeypatch):
     session = create_session(client)
     service = client.app.state.services.inspiration
 
-    def fake_run_agent_turn(**_: Any) -> dict[str, Any]:
-        return {
-            "reply": "已进入 Agent 提示词确认阶段。",
-            "stage": "prompt_revision",
+    monkeypatch.setattr(
+        service,
+        "_run_agent_turn",
+        lambda **_: {
+            "reply": "我已经把分图整理好了，我们可以直接锁定，也可以回退重想一下 🙂",
+            "stage": "allocation_ready",
             "locked": False,
-            "style_payload": {
-                "painting_style": "手绘插画",
-                "color_mood": "温暖治愈",
-                "prompt_example": "请保持统一风格与清晰图文布局。",
-                "style_prompt": "生成一张：以西安城墙和羊肉泡馍为核心的信息图。",
-                "extra_keywords": [],
+            "progress": 72,
+            "progress_label": "分图预览",
+            "options": {
+                "items": [
+                    {"label": "很棒，就这样锁定吧", "action_hint": "confirm_and_lock"},
+                    {"label": "我想再调整一下第二张图", "action_hint": "revise"},
+                ]
             },
-            "style_prompt": "生成一张：以西安城墙和羊肉泡馍为核心的信息图。",
-            "options": {"title": "请选择下一步", "items": ["确认提示词"], "max": 1},
-            "dynamic_stage": "style_discovery",
-            "dynamic_stage_label": "Agent 风格分析",
-            "trace": [
-                {
-                    "id": "trace-1",
-                    "node": "tool_node",
-                    "decision": "suggest_style",
-                    "tool_name": "suggest_painting_style",
-                    "summary": "已根据用户输入完成风格分析。",
-                    "status": "completed",
-                    "created_at": "2026-03-06T00:00:00Z",
-                }
-            ],
-            "requirement_ready": True,
-            "prompt_confirmable": True,
-        }
-
-    monkeypatch.setattr(service, "_run_agent_turn", fake_run_agent_turn, raising=False)
+            "trace": [],
+        },
+        raising=False,
+    )
 
     response = client.post(
         "/api/v1/inspirations/messages",
-        data={"session_id": session["id"], "text": "我想做一篇西安美食和景点攻略"},
+        data={"session_id": session["id"], "action": "confirm_and_lock", "text": "先按这个方向继续"},
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["draft"]["stage"] == "prompt_revision"
-    assert body["agent"]["mode"] == "langgraph"
-    assert body["agent"]["dynamic_stage"] == "style_discovery"
-    assert body["agent"]["dynamic_stage_label"] == "Agent 风格分析"
-    assert body["agent"]["trace"][0]["tool_name"] == "suggest_painting_style"
+    assert body["draft"]["stage"] == "allocation_ready"
+    assert body["draft"]["progress"] == 72
+    assert body["draft"]["progress_label"] == "分图预览"
+    assert body["draft"]["options"]["items"][0]["label"] == "很棒，就这样锁定吧"
+    assert body["draft"]["options"]["items"][0]["action_hint"] == "confirm_and_lock"
 
 
 def test_creative_agent_tool_node_raises_value_error_for_unknown_tool():
@@ -106,7 +127,7 @@ def test_creative_agent_tool_node_raises_value_error_for_unknown_tool():
         agent._tool_node(
             {
                 "decision": {"tool_name": "missing_tool", "tool_args": {}},
-                "request": {"state": {"stage": "style_collecting", "locked": False}},
+                "request": {"state": {"stage": "initial_understanding", "locked": False}},
                 "trace": [],
             }
         )
@@ -116,142 +137,105 @@ def test_creative_agent_tool_node_raises_value_error_for_unknown_tool():
         raise AssertionError("unknown tool should raise ValueError")
 
 
-def test_creative_agent_build_turn_result_maps_extract_assets():
+def test_creative_agent_capture_tool_output_returns_structured_data_only():
     from backend.app.agent.creative_agent import CreativeAgent
 
     agent = CreativeAgent.__new__(CreativeAgent)
-    result = agent._build_turn_result(
-        request={"state": {"stage": "prompt_revision", "locked": False}},
-        decision={"dynamic_stage": "asset_extraction", "dynamic_stage_label": "资产提取"},
+
+    asset_capture = agent._capture_tool_output(
         tool_name="extract_assets",
-        tool_result={
-            "locations": ["西安"],
-            "foods": ["羊肉泡馍"],
-            "scenes": ["城墙"],
-            "keywords": ["攻略"],
-            "source_asset_ids": ["asset-1"],
-            "confidence": 0.9,
-        },
-        trace=[],
+        tool_result={"foods": ["羊肉泡馍"], "scenes": ["城墙"]},
+        request={"state": {"stage": "prompt_ready"}},
     )
-
-    assert result["stage"] == "asset_confirming"
-    assert result["asset_candidates"]["foods"] == ["羊肉泡馍"]
-    assert result["dynamic_stage"] == "asset_extraction"
-
-
-def test_creative_agent_build_turn_result_maps_generate_style_prompt():
-    from backend.app.agent.creative_agent import CreativeAgent
-
-    agent = CreativeAgent.__new__(CreativeAgent)
-    result = agent._build_turn_result(
-        request={"state": {"stage": "style_collecting", "locked": False}},
-        decision={"dynamic_stage": "prompt_generation", "dynamic_stage_label": "提示词生成"},
-        tool_name="generate_style_prompt",
-        tool_result={
-            "style_prompt": "生成一张：西安城墙与泡馍攻略图。",
-            "image_count": 2,
-        },
-        trace=[],
-    )
-
-    assert result["stage"] == "prompt_revision"
-    assert result["style_prompt"] == "生成一张：西安城墙与泡馍攻略图。"
-    assert result["image_count"] == 2
-
-
-def test_creative_agent_build_turn_result_maps_allocate_assets_to_images():
-    from backend.app.agent.creative_agent import CreativeAgent
-
-    agent = CreativeAgent.__new__(CreativeAgent)
-    plan = [
-        {
-            "slot_index": 1,
-            "focus_title": "城墙主图",
-            "focus_description": "突出城墙夜景。",
-            "source_asset_ids": ["asset-1"],
-            "confirmed": False,
-        }
-    ]
-    result = agent._build_turn_result(
-        request={"state": {"stage": "prompt_revision", "locked": False}},
-        decision={"dynamic_stage": "allocation", "dynamic_stage_label": "分图策划"},
-        tool_name="allocate_assets_to_images",
-        tool_result=plan,
-        trace=[],
-    )
-
-    assert result["stage"] == "asset_confirming"
-    assert result["allocation_plan"] == plan
-    assert result["options"]["items"] == ["确认分图并锁定", "继续调整分图"]
-
-
-def test_creative_agent_build_turn_result_maps_save_style_generate_images_and_copy():
-    from backend.app.agent.creative_agent import CreativeAgent
-
-    agent = CreativeAgent.__new__(CreativeAgent)
-    save_result = agent._build_turn_result(
-        request={"state": {"stage": "locked", "locked": True, "draft_style_id": "draft-style-1"}},
-        decision={"dynamic_stage": "style_save", "dynamic_stage_label": "风格归档"},
-        tool_name="save_style",
-        tool_result={"style_id": "style-123", "status": "saved", "style_name": "西安复古手账"},
-        trace=[],
-    )
-    image_result = agent._build_turn_result(
-        request={"state": {"stage": "locked", "locked": True, "draft_style_id": "draft-style-1"}},
-        decision={"dynamic_stage": "generation", "dynamic_stage_label": "生成执行"},
+    image_capture = agent._capture_tool_output(
         tool_name="generate_images",
         tool_result={"job_id": "job-123", "status": "queued"},
-        trace=[],
-    )
-    copy_result = agent._build_turn_result(
-        request={"state": {"stage": "locked", "locked": True}},
-        decision={"dynamic_stage": "copy_generation", "dynamic_stage_label": "文案生成"},
-        tool_name="generate_copy",
-        tool_result={"job_id": "job-123", "status": "queued"},
-        trace=[],
+        request={"state": {"stage": "allocation_ready"}},
     )
 
-    assert save_result["stage"] == "locked"
-    assert save_result["locked"] is True
-    assert save_result["draft_style_id"] == "style-123"
-    assert image_result["stage"] == "locked"
-    assert image_result["locked"] is True
-    assert image_result["job_id"] == "job-123"
-    assert image_result["options"] == {"title": "请选择下一步", "items": ["保存风格", "暂不保存"], "max": 1}
-    assert copy_result["job_id"] == "job-123"
-    assert copy_result["status"] == "queued"
+    assert asset_capture == {"asset_candidates": {"foods": ["羊肉泡馍"], "scenes": ["城墙"]}}
+    assert image_capture == {"active_job_id": "job-123", "job_status": "queued"}
+    assert "reply" not in image_capture
+    assert "options" not in image_capture
 
 
-def test_creative_agent_build_input_summary_contains_richer_context():
+def test_creative_agent_multi_tool_roundtrip_accumulates_tool_history(tmp_path):
     from backend.app.agent.creative_agent import CreativeAgent
 
-    agent = CreativeAgent.__new__(CreativeAgent)
-    summary = agent._build_input_summary(
+    decisions = [
+        {
+            "decision": "use_tool",
+            "reason": "先提取素材。",
+            "tool_name": "extract_assets",
+            "tool_args": {"session_id": "session-1", "user_hint": "西安攻略", "style_prompt": ""},
+            "dynamic_stage": "asset_extracting",
+            "dynamic_stage_label": "提取素材",
+        },
+        {
+            "decision": "use_tool",
+            "reason": "素材齐了，直接启动生成。",
+            "tool_name": "generate_images",
+            "tool_args": {"session_id": "session-1"},
+            "dynamic_stage": "auto_generating",
+            "dynamic_stage_label": "自动生成",
+        },
+        {
+            "decision": "respond_directly",
+            "reason": "已经自动启动生成，向用户汇报结果。",
+            "result": {
+                "reply": "我已经把素材整理好，并直接帮你启动生成啦 🎨",
+                "stage": "generation_started",
+                "locked": True,
+                "progress": 100,
+                "progress_label": "生成已启动",
+                "options": {
+                    "items": [
+                        {"label": "我想再调整一下构图", "action_hint": "revise"},
+                        {"label": "先保持这个方向", "action_hint": "continue"},
+                    ]
+                },
+            },
+        },
+    ]
+    llm_provider = _FakeLLMProvider(decisions)
+    agent = CreativeAgent(
+        llm_provider=llm_provider,
+        tools={
+            "extract_assets": _ToolStub(lambda _: {"foods": ["羊肉泡馍"], "scenes": ["城墙"]}),
+            "generate_images": _ToolStub(lambda _: {"job_id": "job-123", "status": "queued"}),
+        },
+        db_path=tmp_path / "agent.db",
+    )
+
+    result = agent.respond(
         {
             "session_id": "session-1",
-            "text": "请继续",
-            "selected_items": ["自然写实"],
-            "attachments": [{"type": "image", "usage_type": "style_reference"}],
+            "text": "我要做西安三张图攻略",
+            "selected_items": [],
+            "attachments": [],
+            "action": None,
             "state": {
-                "stage": "prompt_revision",
+                "stage": "initial_understanding",
                 "locked": False,
-                "style_payload": {"painting_style": "自然写实"},
-                "style_prompt": "生成一张：西安城墙攻略图。",
-                "asset_candidates": {"foods": ["羊肉泡馍"], "scenes": ["城墙"]},
-                "allocation_plan": [{"slot_index": 1, "focus_title": "城墙主图"}],
-                "image_count": 2,
+                "style_payload": {},
+                "style_prompt": "",
+                "asset_candidates": {},
+                "allocation_plan": [],
+                "image_count": 3,
+                "draft_style_id": "draft-style-1",
             },
-            "content_mode": "food_scenic",
         }
     )
 
-    assert "content_mode=food_scenic" in summary
-    assert "style_payload=" in summary
-    assert "asset_candidates=" in summary
-    assert "allocation_plan=" in summary
-    assert "style_prompt=" in summary
-    assert 'attachments=[{"type": "image", "usage_type": "style_reference"}]' in summary
+    assert len(llm_provider.model.calls) == 3
+    second_turn_summary = llm_provider.model.calls[1][-1].content
+    third_turn_summary = llm_provider.model.calls[2][-1].content
+    assert "tool_history=" in second_turn_summary
+    assert "extract_assets" in second_turn_summary
+    assert "generate_images" in third_turn_summary
+    assert result["reply"].startswith("我已经把素材整理好")
+    assert result["options"]["items"][0]["action_hint"] == "revise"
+    assert result["progress"] == 100
 
 
 def test_creative_agent_system_prompt_loaded_from_external_file():
@@ -260,74 +244,85 @@ def test_creative_agent_system_prompt_loaded_from_external_file():
     agent = CreativeAgent.__new__(CreativeAgent)
     prompt = agent._build_system_prompt()
 
-    assert "extract_assets" in prompt
-    assert "generate_style_prompt" in prompt
-    assert "allocate_assets_to_images" in prompt
-    assert "save_style" in prompt
-    assert "generate_images" in prompt
-    assert "generate_copy" in prompt
-    assert "respond_directly" in prompt
+    assert "友好热情的创作助手" in prompt
+    assert "reset_progress" in prompt
+    assert "action_hint" in prompt
+    assert "progress" in prompt
+    assert "emoji" in prompt or "🙂" in prompt or "🎨" in prompt
 
 
-def test_apply_agent_turn_preserves_existing_allocation_and_locked_for_sparse_respond_directly(client):
+def test_apply_agent_turn_supports_dynamic_options_progress_and_active_job(client):
     session = create_session(client)
     service = client.app.state.services.inspiration
     state = service._ensure_state(session["id"])
-    state["stage"] = "asset_confirming"
-    state["locked"] = True
-    state["allocation_plan"] = [
-        {
-            "slot_index": 1,
-            "focus_title": "城墙主图",
-            "focus_description": "保留已有分图。",
-            "source_asset_ids": ["asset-1"],
-            "confirmed": True,
-        }
-    ]
 
     service._apply_agent_turn(
         session_id=session["id"],
         state=state,
         turn={
-            "reply": "这些图可以继续做 3:4 和 4:5 版式。",
-            "stage": "asset_confirming",
+            "reply": "我已经直接帮你启动生成，现在右侧会开始刷新进度 🎨",
+            "stage": "generation_started",
+            "locked": True,
+            "progress": 100,
+            "progress_label": "生成已启动",
+            "active_job_id": "job-123",
+            "options": {
+                "items": [
+                    {"label": "我想回到分图再调一下", "action_hint": "revise"},
+                    {"label": "先这样继续生成", "action_hint": "continue"},
+                ]
+            },
             "trace": [],
         },
     )
 
-    assert state["locked"] is True
-    assert len(state["allocation_plan"]) == 1
-    assert state["allocation_plan"][0]["focus_title"] == "城墙主图"
+    conversation = service.get_conversation(session["id"])
+
+    assert conversation["draft"]["stage"] == "generation_started"
+    assert conversation["draft"]["progress"] == 100
+    assert conversation["draft"]["progress_label"] == "生成已启动"
+    assert conversation["draft"]["active_job_id"] == "job-123"
+    assert conversation["draft"]["options"]["items"][0]["label"] == "我想回到分图再调一下"
 
 
-def test_build_creative_tools_supports_save_style_and_session_generation():
+def test_build_creative_tools_supports_reset_progress_save_style_and_session_generation():
     from backend.app.agent.tools import build_creative_tools
 
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str | None]] = []
 
     class RuntimeStub:
-        def save_style_from_agent(self, *, session_id: str) -> dict[str, Any]:
-            calls.append(("save_style_from_agent", session_id))
+        def save_style_from_agent(self, session_id: str) -> dict[str, Any]:
+            calls.append(("save_style_from_agent", session_id, None))
             return {"style_id": "style-1", "status": "saved"}
 
         def generate_images(self, *, session_id: str) -> dict[str, Any]:
-            calls.append(("generate_images", session_id))
+            calls.append(("generate_images", session_id, None))
             return {"job_id": "job-1", "status": "queued"}
+
+        def reset_progress(self, *, session_id: str, reset_to: str) -> dict[str, Any]:
+            calls.append(("reset_progress", session_id, reset_to))
+            return {"stage": "prompt_reopened"}
 
     tools = build_creative_tools(RuntimeStub())
     save_result = tools["save_style"].invoke({"session_id": "session-1"})
     image_result = tools["generate_images"].invoke({"session_id": "session-1"})
+    reset_result = tools["reset_progress"].invoke({"session_id": "session-1", "reset_to": "prompt"})
 
     assert save_result["style_id"] == "style-1"
     assert image_result["job_id"] == "job-1"
-    assert calls == [("save_style_from_agent", "session-1"), ("generate_images", "session-1")]
+    assert reset_result["stage"] == "prompt_reopened"
+    assert calls == [
+        ("save_style_from_agent", "session-1", None),
+        ("generate_images", "session-1", None),
+        ("reset_progress", "session-1", "prompt"),
+    ]
 
 
 def test_inspiration_service_save_style_from_agent_creates_style(client, monkeypatch):
     session = create_session(client)
     service = client.app.state.services.inspiration
     state = service._ensure_state(session["id"])
-    state["stage"] = "locked"
+    state["stage"] = "locked_ready"
     state["locked"] = True
     state["style_prompt"] = "生成一张：西安城墙与泡馍攻略图。"
     state["style_payload"] = {
@@ -364,15 +359,16 @@ def test_inspiration_service_save_style_from_agent_creates_style(client, monkeyp
     assert saved_style["name"] == "西安复古手账"
 
 
-def test_inspiration_service_generate_images_creates_job_from_session_state(client, monkeypatch):
+def test_inspiration_service_generate_images_can_auto_start_when_ready_without_locked(client, monkeypatch):
     session = create_session(client, content_mode="food_scenic")
     style = create_style(client, session["id"], {"painting_style": "自然写实"})
     service = client.app.state.services.inspiration
     state = service._ensure_state(session["id"])
-    state["stage"] = "locked"
-    state["locked"] = True
+    state["stage"] = "allocation_ready"
+    state["locked"] = False
     state["draft_style_id"] = style["id"]
     state["image_count"] = 2
+    state["allocation_plan"] = [{"slot_index": 1, "focus_title": "城墙主图", "focus_description": "突出城墙。"}]
     service.inspiration_repo.upsert_state(state)
 
     scheduled_job_ids: list[str] = []
@@ -387,6 +383,38 @@ def test_inspiration_service_generate_images_creates_job_from_session_state(clie
     assert job["session_id"] == session["id"]
     assert job["style_profile_id"] == style["id"]
     assert job["image_count"] == 2
+
+
+def test_inspiration_service_reset_progress_clears_state_by_scope(client):
+    session = create_session(client)
+    style = create_style(client, session["id"], {"painting_style": "复古手账"})
+    service = client.app.state.services.inspiration
+    state = service._ensure_state(session["id"])
+    state.update(
+        {
+            "stage": "allocation_ready",
+            "locked": True,
+            "style_payload": {"painting_style": "复古手账", "color_mood": "暖黄", "prompt_example": "统一风格", "style_prompt": "图解西安", "extra_keywords": []},
+            "style_prompt": "图解西安",
+            "asset_candidates": {"foods": ["羊肉泡馍"]},
+            "allocation_plan": [{"slot_index": 1, "focus_title": "城墙主图"}],
+            "draft_style_id": style["id"],
+            "progress": 78,
+            "progress_label": "分图规划",
+            "active_job_id": "job-123",
+        }
+    )
+    service.inspiration_repo.upsert_state(state)
+
+    result = service.reset_progress(session_id=session["id"], reset_to="allocation")
+
+    assert result["stage"] == "prompt_confirmed"
+    updated = service._ensure_state(session["id"])
+    assert updated["allocation_plan"] == []
+    assert updated["locked"] is False
+    assert updated["active_job_id"] is None
+    assert updated["style_prompt"] == "图解西安"
+    assert updated["style_payload"]["painting_style"] == "复古手账"
 
 
 def test_inspiration_send_message_propagates_agent_error_without_fallback(client, monkeypatch):
@@ -409,98 +437,58 @@ def test_inspiration_send_message_propagates_agent_error_without_fallback(client
         )
 
 
-def test_agent_only_end_to_end_can_lock_and_generate(client, monkeypatch):
-    setup_model_routing(client)
-    session = create_session(client, title="agent主脑流程", content_mode="food_scenic")
-    style = create_style(client, session["id"], {"painting_style": "自然写实"})
+def test_inspiration_progress_can_move_from_zero_to_hundred(client, monkeypatch):
+    session = create_session(client)
     service = client.app.state.services.inspiration
 
-    def fake_run_agent_turn(**kwargs: Any) -> dict[str, Any]:
-        action = kwargs.get("action")
-        selected_items = kwargs.get("selected_items") or []
-        if action == "confirm_allocation_plan":
-            return {
-                "reply": "方案已锁定，可开始生成。",
-                "stage": "locked",
+    progress_turns = iter(
+        [
+            {
+                "reply": "我先了解一下你这次想做的方向 🙂",
+                "stage": "briefing",
+                "locked": False,
+                "progress": 10,
+                "progress_label": "初始了解",
+                "options": {"items": [{"label": "我想做西安美食攻略", "action_hint": "describe_goal"}]},
+                "trace": [],
+            },
+            {
+                "reply": "风格已经对齐好了，我来继续整理提示词。",
+                "stage": "style_aligned",
+                "locked": False,
+                "progress": 35,
+                "progress_label": "风格确定",
+                "options": {"items": [{"label": "继续整理提示词", "action_hint": "continue_prompt"}]},
+                "trace": [],
+            },
+            {
+                "reply": "分图已经排好了，我准备直接启动生成。",
+                "stage": "allocation_ready",
                 "locked": True,
-                "draft_style_id": style["id"],
-                "allocation_plan": [
-                    {
-                        "slot_index": 1,
-                        "focus_title": "城墙与泡馍",
-                        "focus_description": "图解西安城墙与羊肉泡馍。",
-                        "source_asset_ids": ["asset-1"],
-                        "confirmed": True,
-                    }
-                ],
-                "dynamic_stage": "locked",
-                "dynamic_stage_label": "方案锁定",
+                "progress": 78,
+                "progress_label": "分图规划",
+                "options": {"items": [{"label": "直接开始生成", "action_hint": "auto_generate"}]},
                 "trace": [],
-            }
-        if action == "confirm_prompt":
-            return {
-                "reply": "已完成分图规划，请确认锁定。",
-                "stage": "asset_confirming",
-                "locked": False,
-                "draft_style_id": style["id"],
-                "allocation_plan": [
-                    {
-                        "slot_index": 1,
-                        "focus_title": "城墙与泡馍",
-                        "focus_description": "图解西安城墙与羊肉泡馍。",
-                        "source_asset_ids": ["asset-1"],
-                        "confirmed": False,
-                    }
-                ],
-                "asset_candidates": {"foods": ["羊肉泡馍"], "scenes": ["城墙"], "keywords": ["西安攻略"], "source_asset_ids": ["asset-1"]},
-                "options": {"title": "请选择下一步", "items": ["确认分图并锁定"], "max": 1},
-                "dynamic_stage": "allocation",
-                "dynamic_stage_label": "分图策划",
+            },
+            {
+                "reply": "我已经帮你启动生成啦 🎨",
+                "stage": "generation_started",
+                "locked": True,
+                "progress": 100,
+                "progress_label": "生成已启动",
+                "active_job_id": "job-123",
+                "options": {"items": [{"label": "回到分图再调一下", "action_hint": "revise"}]},
                 "trace": [],
-            }
-        if selected_items:
-            return {
-                "reply": "已生成提示词，请确认。",
-                "stage": "prompt_revision",
-                "locked": False,
-                "draft_style_id": style["id"],
-                "style_payload": {
-                    "painting_style": "自然写实",
-                    "color_mood": "温暖治愈",
-                    "prompt_example": "请保持统一风格与清晰图文布局。",
-                    "style_prompt": "生成一张：西安城墙与羊肉泡馍攻略图。",
-                    "extra_keywords": [],
-                },
-                "style_prompt": "生成一张：西安城墙与羊肉泡馍攻略图。",
-                "image_count": 1,
-                "options": {"title": "请选择下一步", "items": ["确认提示词"], "max": 1},
-                "dynamic_stage": "prompt_generation",
-                "dynamic_stage_label": "提示词生成",
-                "trace": [],
-            }
-        return {
-            "reply": "请选择风格方向。",
-            "stage": "style_collecting",
-            "locked": False,
-            "options": {"title": "请选择绘画风格", "items": ["自然写实"], "max": 1},
-            "dynamic_stage": "style_discovery",
-            "dynamic_stage_label": "风格分析",
-            "trace": [],
-        }
+            },
+        ]
+    )
 
-    monkeypatch.setattr(service, "_run_agent_turn", fake_run_agent_turn)
+    monkeypatch.setattr(service, "_run_agent_turn", lambda **_: next(progress_turns))
 
-    first = client.post("/api/v1/inspirations/messages", data={"session_id": session["id"], "text": "想做西安美食和景点攻略"})
-    assert first.status_code == 200
-    second = client.post("/api/v1/inspirations/messages", data={"session_id": session["id"], "selected_items": "自然写实"})
-    assert second.status_code == 200
-    third = client.post("/api/v1/inspirations/messages", data={"session_id": session["id"], "action": "confirm_prompt"})
-    assert third.status_code == 200
-    final = client.post("/api/v1/inspirations/messages", data={"session_id": session["id"], "action": "confirm_allocation_plan"})
-    assert final.status_code == 200
-    body = final.json()
-    assert body["draft"]["locked"] is True
-    assert body["draft"]["draft_style_id"] == style["id"]
+    progress_values: list[int] = []
+    for text in ["先聊聊方向", "这个风格挺好", "分图也可以", "那就开始生成"]:
+        response = client.post("/api/v1/inspirations/messages", data={"session_id": session["id"], "text": text})
+        assert response.status_code == 200
+        progress_values.append(response.json()["draft"]["progress"])
 
-    result = service.generate_images(session_id=session["id"])
-    assert result["status"] == "queued"
+    assert progress_values == [10, 35, 78, 100]

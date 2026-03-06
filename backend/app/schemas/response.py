@@ -46,6 +46,15 @@ class StyleOptionBlock(BaseModel):
     max: int
 
 
+class AgentOption(BaseModel):
+    label: str
+    action_hint: str | None = None
+
+
+class AgentOptionBlock(BaseModel):
+    items: list[AgentOption] = Field(default_factory=list)
+
+
 class StyleChatResponse(BaseModel):
     reply: str
     options: StyleOptionBlock
@@ -79,7 +88,7 @@ class InspirationMessage(BaseModel):
     id: str
     role: Literal["assistant", "user", "system"]
     content: str
-    options: StyleOptionBlock | None = None
+    options: AgentOptionBlock | None = None
     fallback_used: bool | None = None
     attachments: list[InspirationAttachment] = Field(default_factory=list)
     asset_candidates: dict[str, Any] | None = None
@@ -135,12 +144,15 @@ class InspirationAgentMeta(BaseModel):
 
 
 class InspirationDraft(BaseModel):
-    stage: Literal["style_collecting", "prompt_revision", "asset_confirming", "locked"]
+    stage: str
     style_payload: StylePayload | None = None
     image_count: int | None = Field(default=None, ge=1, le=10)
     draft_style_id: str | None = None
     allocation_plan: list[InspirationAllocationPlanItem] = Field(default_factory=list)
-    options: StyleOptionBlock | None = None
+    options: AgentOptionBlock | None = None
+    progress: int | None = Field(default=None, ge=0, le=100)
+    progress_label: str | None = None
+    active_job_id: str | None = None
     locked: bool
 
 

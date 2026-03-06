@@ -33,6 +33,7 @@ interface AppState {
   fetchResult: () => Promise<void>;
   fetchStages: () => Promise<void>;
   fetchAssetBreakdown: () => Promise<void>;
+  syncLatestJob: (jobId: string) => Promise<void>;
 
   // UI Actions
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -302,6 +303,26 @@ export const useAppStore = create<AppState>((set, get) => ({
       if ((e as { response?: { status?: number } }).response?.status !== 404) {
         console.error(e);
       }
+    }
+  },
+
+  syncLatestJob: async (jobId) => {
+    const { activeSessionId } = get();
+    if (!jobId || !activeSessionId) return;
+
+    try {
+      const job = await api.getGenerationJob(jobId);
+      if (get().activeSessionId !== job.session_id) return;
+      set({ latestJob: job, latestResult: null, latestStages: [], latestAssetBreakdown: null });
+      get().fetchStages();
+      get().fetchAssetBreakdown();
+      if (job.status === 'success' || job.status === 'partial_success') {
+        get().fetchResult();
+      } else if (job.status === 'queued' || job.status === 'running') {
+        get().pollJobStatus();
+      }
+    } catch (e) {
+      console.error(e);
     }
   }
 }));

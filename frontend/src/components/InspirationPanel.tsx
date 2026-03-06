@@ -34,62 +34,24 @@ function buildCandidateRevisionText(input: api.InspirationAssetCandidates | null
   return `请按以下重点内容继续调整并确认：美食：${foods}；景点：${scenes}；关键词：${keywords}。`;
 }
 
-function isBottomActionOption(option: string): boolean {
-  const text = option.trim();
-  return (
-    text.includes('继续优化') ||
-    text.includes('确定使用') ||
-    text.includes('确认提示词') ||
-    text.includes('确认分图并锁定') ||
-    text.includes('继续调整分图') ||
-    text.includes('保存风格') ||
-    text.includes('暂不保存')
-  );
+function getProgressLabel(draft: api.InspirationDraft | null): string {
+  if (!draft) return '创作进行中';
+  return draft.progress_label || draft.stage || '创作进行中';
 }
 
-function isSaveDecisionOption(option: string): boolean {
-  const text = option.trim();
-  return text.includes('保存风格') || text.includes('暂不保存');
-}
-
-function isAllocationOption(option: string): boolean {
-  const text = option.trim();
-  return text.includes('确认分图') || text.includes('继续调整分图');
-}
-
-function resolveActionValue(option: string): string | undefined {
-  const text = option.trim();
-  if (text.includes('确定使用') || text.includes('确认提示词')) return 'confirm_prompt';
-  if (text.includes('确认资产')) return 'confirm_assets';
-  if (text.includes('确认分图')) return 'confirm_allocation_plan';
-  if (text.includes('继续调整资产')) return 'revise_assets';
-  if (text.includes('继续调整分图')) return 'revise_allocation_plan';
-  if (text.includes('保存风格')) return 'save_style';
-  if (text.includes('暂不保存')) return 'skip_save';
-  return undefined;
-}
-
-function getStageLabel(stage: api.InspirationDraft['stage'] | undefined): string {
-  if (stage === 'prompt_revision') return '张数与提示词确认';
-  if (stage === 'asset_confirming') return '分图确认';
-  if (stage === 'locked') return '锁定生成';
-  return '风格确认';
-}
-
-function shouldRenderInlineOptions(message: api.InspirationMessage): boolean {
-  const items = message.options?.items || [];
-  if (!items.length) return false;
-  return !items.every((item) => isBottomActionOption(item));
+function shouldUseCandidateRevision(actionHint: string | null | undefined): boolean {
+  if (!actionHint) return false;
+  const normalized = actionHint.trim().toLowerCase();
+  return normalized.includes('revise') || normalized.includes('adjust');
 }
 
 export default function InspirationPanel() {
-  const { activeSessionId, addToast, draft, setDraft } = useAppStore();
+  const { activeSessionId, addToast, draft, setDraft, syncLatestJob } = useAppStore();
   const [messages, setMessages] = useState<api.InspirationMessage[]>([]);
   const [agentMeta, setAgentMeta] = useState<api.InspirationAgentMeta | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [inputText, setInputText] = useState('');
   const [pendingFiles, setPendingFiles] = useState<PendingUploadFile[]>([]);
-  const [currentSelection, setCurrentSelection] = useState<string[]>([]);
   const [isStyleDrawerOpen, setIsStyleDrawerOpen] = useState(false);
   const [editableCandidates, setEditableCandidates] = useState<api.InspirationAssetCandidates | null>(null);
   const [isInputDragActive, setIsInputDragActive] = useState(false);
@@ -126,6 +88,9 @@ export default function InspirationPanel() {
       setMessages(response.messages || []);
       setDraft(response.draft || null);
       setAgentMeta(response.agent || null);
+      if (response.draft?.active_job_id) {
+        void syncLatestJob(response.draft.active_job_id);
+      }
     } catch {
       if (sessionIdRef.current !== sessionId) return;
       setMessages([{ id: Date.now().toString(), role: 'system', content: '连接失败，请稍后重试。', created_at: new Date().toISOString() }]);
@@ -133,7 +98,7 @@ export default function InspirationPanel() {
     } finally {
       if (sessionIdRef.current === sessionId) setIsLoading(false);
     }
-  }, [setDraft]);
+  }, [setDraft, syncLatestJob]);
 
   useEffect(() => {
     pendingFilesRef.current = pendingFiles;
@@ -160,7 +125,6 @@ export default function InspirationPanel() {
     setMessages([]);
     setDraft(null);
     setAgentMeta(null);
-    setCurrentSelection([]);
     setPendingFiles((previous) => {
       revokePreviewUrls(previous);
       return [];
@@ -209,40 +173,7 @@ export default function InspirationPanel() {
     setEditableCandidates(null);
   }, [draft?.stage, latestCandidateBlock]);
 
-  const lastOptionMsgIndex = useMemo(() => {
-    return messages
-      .map((message, index) => (shouldRenderInlineOptions(message) ? index : -1))
-      .reduce((max, current) => Math.max(max, current), -1);
-  }, [messages]);
-
-  const dynamicBottomOptionBlock = useMemo(() => {
-    const optionBlock = draft?.options;
-    if (!optionBlock?.items?.length) return null;
-    const bottomItems = optionBlock.items.filter((item) => isBottomActionOption(item));
-    if (!bottomItems.length) return null;
-    return { ...optionBlock, items: bottomItems };
-  }, [draft?.options]);
-
-  const handleOptionClick = (event: React.MouseEvent, option: string, max: number, isLatestOption: boolean) => {
-    event.stopPropagation();
-    if (isLoading || !isLatestOption) return;
-    if (draft?.locked && !isSaveDecisionOption(option)) return;
-
-    const actionValue = resolveActionValue(option);
-
-    if (max <= 1) {
-      handleSend(actionValue, [option]);
-      return;
-    }
-    setCurrentSelection((previous) => {
-      if (previous.includes(option)) return previous.filter((item) => item !== option);
-      if (previous.length >= max) {
-        addToast(`最多只能选择 ${max} 项。`, 'info');
-        return previous;
-      }
-      return [...previous, option];
-    });
-  };
+  const currentOptions = useMemo(() => draft?.options?.items || [], [draft?.options]);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (!event.target.files) return;
@@ -308,7 +239,7 @@ export default function InspirationPanel() {
     if (!activeSessionId || isLoading) return;
 
     const text = (overrideText ?? inputText).trim();
-    const selection = customSelection || currentSelection;
+    const selection = customSelection || [];
     const pendingSnapshot = pendingFiles;
     const hasText = !!text;
     const hasSelection = selection.length > 0;
@@ -337,7 +268,6 @@ export default function InspirationPanel() {
 
     setInputText('');
     setPendingFiles([]);
-    setCurrentSelection([]);
     setIsLoading(true);
     const requestSessionId = activeSessionId;
 
@@ -354,6 +284,9 @@ export default function InspirationPanel() {
       setMessages(response.messages || []);
       setDraft(response.draft || null);
       setAgentMeta(response.agent || null);
+      if (response.draft?.active_job_id) {
+        void syncLatestJob(response.draft.active_job_id);
+      }
     } catch (error) {
       if (sessionIdRef.current !== requestSessionId) return;
       const typedError = error as { response?: { data?: { code?: string } } };
@@ -369,63 +302,9 @@ export default function InspirationPanel() {
     }
   };
 
-  const handleReviseAssets = () => {
-    const revisionText = buildCandidateRevisionText(editableCandidates);
-    handleSend('revise_allocation_plan', ['继续调整分图'], revisionText);
-  };
-
-  const renderDynamicActionButtons = (optionBlock: api.StyleOptionBlock, location: 'footer' | 'allocation') => {
-    const items = optionBlock.items || [];
-    if (!items.length) return null;
-    if (optionBlock.max > 1) {
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div className="chat-options">
-            {items.map((option) => {
-              const isSelected = currentSelection.includes(option);
-              return (
-                <button
-                  key={`${location}-${option}`}
-                  className={`chat-option ${isSelected ? 'selected' : ''}`}
-                  disabled={isLoading || !!draft?.locked}
-                  onClick={(event) => handleOptionClick(event, option, optionBlock.max, true)}
-                >
-                  {option}
-                </button>
-              );
-            })}
-          </div>
-          <button
-            className="btn btn-primary"
-            disabled={currentSelection.length === 0 || isLoading}
-            onClick={() => handleSend(undefined, currentSelection)}
-          >
-            确认提交
-          </button>
-        </div>
-      );
-    }
-    return (
-      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-        {items.map((option) => {
-          const primary = option.includes('确认') || option.includes('保存') || option.includes('生成');
-          const disableAction = isLoading || (!!draft?.locked && !isSaveDecisionOption(option));
-          const actionValue = option.includes('继续调整分图')
-            ? () => handleReviseAssets()
-            : () => handleSend(resolveActionValue(option), [option]);
-          return (
-            <button
-              key={`${location}-${option}`}
-              className={primary ? 'btn btn-primary' : 'btn btn-secondary'}
-              disabled={disableAction}
-              onClick={actionValue}
-            >
-              {option}
-            </button>
-          );
-        })}
-      </div>
-    );
+  const handleAgentOptionClick = (option: api.AgentOption) => {
+    const overrideText = shouldUseCandidateRevision(option.action_hint) ? buildCandidateRevisionText(editableCandidates) : undefined;
+    handleSend(option.action_hint || undefined, [option.label], overrideText);
   };
 
   return (
@@ -445,7 +324,7 @@ export default function InspirationPanel() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px 20px', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-glass)', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
             <div style={{ color: 'var(--accent-color)', fontWeight: 600 }}>
-              当前 Agent 阶段：{agentMeta?.dynamic_stage_label || getStageLabel(draft.stage)}
+              当前 Agent 阶段：{agentMeta?.dynamic_stage_label || getProgressLabel(draft)}
             </div>
             {agentMeta?.dynamic_stage && (
               <div style={{ color: 'var(--text-secondary)' }}>
@@ -453,6 +332,25 @@ export default function InspirationPanel() {
               </div>
             )}
           </div>
+          {typeof draft.progress === 'number' ? (
+            <div style={{ display: 'grid', gap: '6px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                <span>{draft.progress_label || '创作进行中'}</span>
+                <span>{draft.progress}%</span>
+              </div>
+              <div style={{ height: '8px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                <div
+                  style={{
+                    width: `${Math.max(0, Math.min(100, draft.progress))}%`,
+                    height: '100%',
+                    borderRadius: '999px',
+                    background: 'linear-gradient(90deg, #f59e0b 0%, #ef4444 100%)',
+                    transition: 'width 220ms ease',
+                  }}
+                />
+              </div>
+            </div>
+          ) : null}
           {agentMeta?.trace?.length ? (
             <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'grid', gap: '6px' }}>
               <div style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Agent 工具链</div>
@@ -489,15 +387,7 @@ export default function InspirationPanel() {
               <ChatMessageItem
                 key={`${message.id}-${index}`}
                 message={message}
-                index={index}
-                currentSelection={currentSelection}
-                isLoading={isLoading}
-                isLocked={!!draft?.locked}
-                lastOptionMsgIndex={lastOptionMsgIndex}
-                shouldRenderInlineOptions={shouldRenderInlineOptions}
                 onPreview={openImagePreview}
-                onOptionClick={handleOptionClick}
-                onSubmitSelection={() => handleSend(undefined, currentSelection)}
               />
             ))}
 
@@ -508,34 +398,33 @@ export default function InspirationPanel() {
             )}
           </div>
 
-          {draft?.stage === 'asset_confirming' && editableCandidates && (
+          {editableCandidates && (
+            (draft?.allocation_plan?.length || 0) > 0
+            || (editableCandidates.foods || []).length > 0
+            || (editableCandidates.scenes || []).length > 0
+            || (editableCandidates.keywords || []).length > 0
+          ) && (
             <CandidateEditor
               editableCandidates={editableCandidates}
               allocationPlan={draft?.allocation_plan || []}
               isLoading={isLoading}
               onRemoveCandidateItem={removeCandidateItem}
-              actionArea={
-                dynamicBottomOptionBlock?.items.some((item) => isAllocationOption(item))
-                  ? renderDynamicActionButtons(
-                      { ...dynamicBottomOptionBlock, items: dynamicBottomOptionBlock.items.filter((item) => isAllocationOption(item)) },
-                      'allocation',
-                    )
-                  : null
-              }
+              actionArea={null}
             />
           )}
 
           <div style={{ marginTop: '8px', borderTop: '1px solid var(--border-color)', padding: '14px 0' }}>
             <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
-              {dynamicBottomOptionBlock
-                ? renderDynamicActionButtons(
-                    {
-                      ...dynamicBottomOptionBlock,
-                      items: dynamicBottomOptionBlock.items.filter((item) => !isAllocationOption(item)),
-                    },
-                    'footer',
-                  )
-                : null}
+              {currentOptions.map((option) => (
+                <button
+                  key={`${option.action_hint || 'option'}-${option.label}`}
+                  className="btn btn-secondary"
+                  disabled={isLoading}
+                  onClick={() => handleAgentOptionClick(option)}
+                >
+                  {option.label}
+                </button>
+              ))}
             </div>
 
             <ChatInput

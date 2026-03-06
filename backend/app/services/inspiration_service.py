@@ -140,6 +140,7 @@ class InspirationService(InspirationFlowMixin):
     ) -> dict[str, Any]:
         if not self.creative_agent:
             raise DomainError(code="E-1006", message="Agent 模式尚未初始化", status_code=503)
+        selected_style_profile = self._resolve_selected_style_profile(action=action, selected_items=selected_items)
         request_payload = {
             "session_id": session["id"],
             "text": text,
@@ -147,8 +148,9 @@ class InspirationService(InspirationFlowMixin):
             "action": action,
             "attachments": attachments,
             "content_mode": session.get("content_mode"),
+            "selected_style_profile": selected_style_profile,
             "state": {
-                "stage": state.get("stage", "style_collecting"),
+                "stage": state.get("stage", "initial_understanding"),
                 "locked": bool(state.get("locked")),
                 "content_mode": session.get("content_mode"),
                 "style_payload": self._build_style_payload(state),
@@ -157,6 +159,9 @@ class InspirationService(InspirationFlowMixin):
                 "image_count": state.get("image_count"),
                 "allocation_plan": state.get("allocation_plan") if isinstance(state.get("allocation_plan"), list) else [],
                 "draft_style_id": state.get("draft_style_id"),
+                "progress": state.get("progress"),
+                "progress_label": state.get("progress_label"),
+                "active_job_id": state.get("active_job_id"),
             },
         }
         self._active_agent_session_id = session["id"]
@@ -173,6 +178,7 @@ class InspirationService(InspirationFlowMixin):
         turn: dict[str, Any],
     ) -> None:
         turn_payload = dict(turn)
+        normalized_options = self._normalize_agent_options(turn_payload["options"]) if "options" in turn_payload else None
         if "style_payload" in turn_payload and turn_payload.get("style_payload") is not None:
             state["style_payload"] = self.style_service._normalize_style_payload(turn_payload["style_payload"])
         if "style_prompt" in turn_payload and turn_payload.get("style_prompt") is not None:
@@ -190,9 +196,17 @@ class InspirationService(InspirationFlowMixin):
         if "prompt_confirmable" in turn_payload and turn_payload.get("prompt_confirmable") is not None:
             state["prompt_confirmable"] = bool(turn_payload.get("prompt_confirmable"))
         if "stage" in turn_payload and turn_payload.get("stage") is not None:
-            state["stage"] = str(turn_payload.get("stage") or state.get("stage") or "style_collecting")
+            state["stage"] = str(turn_payload.get("stage") or state.get("stage") or "initial_understanding")
         if "locked" in turn_payload and turn_payload.get("locked") is not None:
             state["locked"] = bool(turn_payload["locked"])
+        if "progress" in turn_payload:
+            state["progress"] = self._normalize_progress_value(turn_payload.get("progress"), fallback=state.get("progress"))
+        if "progress_label" in turn_payload:
+            progress_label = str(turn_payload.get("progress_label") or "").strip()
+            state["progress_label"] = progress_label or None
+        if "active_job_id" in turn_payload:
+            active_job_id = str(turn_payload.get("active_job_id") or "").strip()
+            state["active_job_id"] = active_job_id or None
         state["updated_at"] = now_iso()
         self.inspiration_repo.upsert_state(state)
         reply_text = str(turn_payload.get("reply") or "").strip() or "Agent 已处理当前请求。"
@@ -202,7 +216,7 @@ class InspirationService(InspirationFlowMixin):
             content=reply_text,
             stage=state["stage"],
             attachments=[],
-            options=turn_payload.get("options"),
+            options=normalized_options,
             fallback_used=False,
             asset_candidates=turn_payload.get("asset_candidates"),
             style_context=self._build_style_context(state),
@@ -227,9 +241,60 @@ class InspirationService(InspirationFlowMixin):
         return {
             "mode": "langgraph",
             "dynamic_stage": state.get("stage"),
-            "dynamic_stage_label": None,
+            "dynamic_stage_label": state.get("progress_label"),
             "trace": [],
         }
+
+    def _resolve_selected_style_profile(
+        self,
+        *,
+        action: str | None,
+        selected_items: list[str],
+    ) -> dict[str, Any]:
+        if action != "use_style_profile":
+            return {}
+        style_id = selected_items[0].strip() if selected_items else ""
+        if not style_id:
+            return {}
+        profile = self.style_repo.get(style_id)
+        if not profile:
+            return {}
+        return {
+            "id": profile["id"],
+            "name": profile.get("name"),
+            "style_payload": self.style_service._normalize_style_payload(profile.get("style_payload") or {}),
+        }
+
+    def _normalize_agent_options(self, options: Any) -> dict[str, Any] | None:
+        if options is None:
+            return None
+        items = options.get("items") if isinstance(options, dict) else options
+        if not isinstance(items, list):
+            raise DomainError(code="E-1099", message="Agent 返回的选项结构不合法", status_code=500)
+        normalized_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise DomainError(code="E-1099", message="Agent 选项缺少结构化字段", status_code=500)
+            label = str(item.get("label") or "").strip()
+            if not label:
+                continue
+            action_hint = item.get("action_hint")
+            normalized_items.append(
+                {
+                    "label": label,
+                    "action_hint": str(action_hint).strip() if isinstance(action_hint, str) and action_hint.strip() else None,
+                }
+            )
+        return {"items": normalized_items} if normalized_items else None
+
+    def _normalize_progress_value(self, value: Any, *, fallback: Any = None) -> int | None:
+        if isinstance(value, int):
+            if 0 <= value <= 100:
+                return value
+            raise DomainError(code="E-1099", message="Agent 返回的进度值超出范围", status_code=500)
+        if isinstance(fallback, int) and 0 <= fallback <= 100:
+            return fallback
+        return None
 
     def suggest_painting_style(self, *, stage: str, user_reply: str, selected_items: list[str]) -> dict[str, Any]:
         session_id = str(getattr(self, "_active_agent_session_id", "") or "").strip()
@@ -282,13 +347,12 @@ class InspirationService(InspirationFlowMixin):
         if not session:
             raise not_found("会话", session_id)
         state = self._ensure_state(session_id)
-        if not bool(state.get("locked")):
-            raise DomainError(code="E-1099", message="当前方案尚未锁定，不能开始生成", status_code=400)
         if not self.generation_worker:
             raise DomainError(code="E-1099", message="生成 Worker 不可用", status_code=500)
-        style_profile_id = str(state.get("draft_style_id") or "").strip()
-        if not style_profile_id:
-            raise DomainError(code="E-1099", message="当前草案还没有可生成的风格配置", status_code=400)
+        allocation_plan = state.get("allocation_plan")
+        if not isinstance(allocation_plan, list) or not allocation_plan:
+            raise DomainError(code="E-1099", message="当前草案还没有可生成的分图规划", status_code=400)
+        style_profile_id = self._ensure_draft_style_profile(session, state)
         if not self.style_repo.get(style_profile_id):
             raise not_found("风格", style_profile_id)
         image_count = state.get("image_count")
@@ -311,7 +375,89 @@ class InspirationService(InspirationFlowMixin):
         }
         self.generation_worker.job_repo.create_with_initial_log(job, log_id=new_id())
         self.generation_worker.schedule(job["id"])
+        state["active_job_id"] = job["id"]
+        state["updated_at"] = now_iso()
+        self.inspiration_repo.upsert_state(state)
         return {"job_id": job["id"], "status": "queued"}
+
+    def reset_progress(self, *, session_id: str, reset_to: str) -> dict[str, Any]:
+        session = self.session_repo.get(session_id)
+        if not session:
+            raise not_found("会话", session_id)
+        state = self._ensure_state(session_id)
+        transcript_seen_ids = list(state.get("transcript_seen_ids") or [])
+        base_style_payload = self.style_service._normalize_style_payload({})
+        if reset_to == "style":
+            state["stage"] = "style_reopened"
+            state["style_payload"] = base_style_payload
+            state["style_prompt"] = ""
+            state["asset_candidates"] = {}
+            state["allocation_plan"] = []
+            state["draft_style_id"] = None
+            state["locked"] = False
+            state["progress"] = 20
+            state["progress_label"] = "重新梳理风格"
+            state["active_job_id"] = None
+        elif reset_to == "prompt":
+            state["stage"] = "prompt_reopened"
+            state["style_prompt"] = ""
+            state["asset_candidates"] = {}
+            state["allocation_plan"] = []
+            state["locked"] = False
+            state["progress"] = 45
+            state["progress_label"] = "重新整理提示词"
+            state["active_job_id"] = None
+        elif reset_to == "assets":
+            state["stage"] = "assets_reopened"
+            state["asset_candidates"] = {}
+            state["allocation_plan"] = []
+            state["locked"] = False
+            state["progress"] = 55
+            state["progress_label"] = "重新整理素材"
+            state["active_job_id"] = None
+        elif reset_to == "allocation":
+            state["stage"] = "prompt_confirmed"
+            state["allocation_plan"] = []
+            state["locked"] = False
+            state["progress"] = 60
+            state["progress_label"] = "重新分图"
+            state["active_job_id"] = None
+        elif reset_to == "all":
+            state.update(
+                {
+                    "stage": "initial_understanding",
+                    "style_stage": "painting_style",
+                    "locked": False,
+                    "image_count": None,
+                    "style_prompt": "",
+                    "style_payload": base_style_payload,
+                    "asset_candidates": {},
+                    "allocation_plan": [],
+                    "draft_style_id": None,
+                    "requirement_ready": True,
+                    "prompt_confirmable": False,
+                    "progress": 10,
+                    "progress_label": "初始了解",
+                    "active_job_id": None,
+                }
+            )
+        else:
+            raise DomainError(code="E-1099", message="不支持的回滚阶段", status_code=400)
+        state["transcript_seen_ids"] = transcript_seen_ids
+        state["updated_at"] = now_iso()
+        self.inspiration_repo.upsert_state(state)
+        return {
+            "stage": state["stage"],
+            "locked": state["locked"],
+            "style_payload": state.get("style_payload"),
+            "style_prompt": state.get("style_prompt"),
+            "asset_candidates": state.get("asset_candidates"),
+            "allocation_plan": state.get("allocation_plan"),
+            "draft_style_id": state.get("draft_style_id"),
+            "progress": state.get("progress"),
+            "progress_label": state.get("progress_label"),
+            "active_job_id": state.get("active_job_id"),
+        }
 
     def generate_copy(self, *, job_id: str) -> dict[str, Any]:
         return {"job_id": job_id, "status": "queued"}

@@ -13,7 +13,8 @@ class InspirationRepository:
         row = self.db.fetch_one(
             """
             SELECT session_id, stage, style_stage, is_locked AS locked, image_count, style_prompt,
-                   style_payload, asset_candidates, allocation_plan, draft_style_id, requirement_ready, transcript_seen_ids, updated_at
+                   style_payload, asset_candidates, allocation_plan, draft_style_id, requirement_ready,
+                   transcript_seen_ids, progress, progress_label, active_job_id, updated_at
             FROM inspiration_state
             WHERE session_id = ?
             """,
@@ -26,9 +27,10 @@ class InspirationRepository:
             """
             INSERT INTO inspiration_state (
                 session_id, stage, style_stage, is_locked, image_count, style_prompt,
-                style_payload, asset_candidates, allocation_plan, draft_style_id, requirement_ready, transcript_seen_ids, updated_at
+                style_payload, asset_candidates, allocation_plan, draft_style_id, requirement_ready,
+                transcript_seen_ids, progress, progress_label, active_job_id, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 stage=excluded.stage,
                 style_stage=excluded.style_stage,
@@ -41,6 +43,9 @@ class InspirationRepository:
                 draft_style_id=excluded.draft_style_id,
                 requirement_ready=excluded.requirement_ready,
                 transcript_seen_ids=excluded.transcript_seen_ids,
+                progress=excluded.progress,
+                progress_label=excluded.progress_label,
+                active_job_id=excluded.active_job_id,
                 updated_at=excluded.updated_at
             """,
             (
@@ -56,6 +61,9 @@ class InspirationRepository:
                 state.get("draft_style_id"),
                 1 if state.get("requirement_ready", True) else 0,
                 json_dumps(state.get("transcript_seen_ids", [])),
+                state.get("progress"),
+                state.get("progress_label"),
+                state.get("active_job_id"),
                 state["updated_at"],
             ),
         )
@@ -104,6 +112,10 @@ class InspirationRepository:
         row["asset_candidates"] = json_loads(row.get("asset_candidates"), default={})
         row["allocation_plan"] = json_loads(row.get("allocation_plan"), default=[])
         row["transcript_seen_ids"] = json_loads(row.get("transcript_seen_ids"), default=[])
+        progress = row.get("progress")
+        row["progress"] = int(progress) if isinstance(progress, int) else None
+        row["progress_label"] = row.get("progress_label")
+        row["active_job_id"] = row.get("active_job_id")
         return row
 
     def _deserialize_message(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -112,13 +124,39 @@ class InspirationRepository:
             "id": row["id"],
             "role": row.get("sender") or "assistant",
             "content": row.get("text") or "",
-            "options": json_loads(row.get("options"), default=None),
+            "options": self._normalize_options(json_loads(row.get("options"), default=None)),
             "fallback_used": bool(row["fallback_used"]),
             "attachments": attachments,
             "asset_candidates": json_loads(row.get("asset_candidates"), default=None),
             "style_context": json_loads(row.get("style_context"), default=None),
             "created_at": row["created_at"],
         }
+
+    def _normalize_options(self, options: Any) -> dict[str, Any] | None:
+        if options is None:
+            return None
+        raw_items = options.get("items") if isinstance(options, dict) else options
+        if not isinstance(raw_items, list):
+            return None
+        normalized_items: list[dict[str, Any]] = []
+        for item in raw_items:
+            if isinstance(item, dict):
+                label = str(item.get("label") or "").strip()
+                if not label:
+                    continue
+                action_hint = item.get("action_hint")
+                normalized_items.append(
+                    {
+                        "label": label,
+                        "action_hint": str(action_hint).strip() if isinstance(action_hint, str) and action_hint.strip() else None,
+                    }
+                )
+                continue
+            label = str(item or "").strip()
+            if not label:
+                continue
+            normalized_items.append({"label": label, "action_hint": None})
+        return {"items": normalized_items} if normalized_items else None
 
     def _normalize_attachments(self, attachments: Any) -> list[dict[str, Any]]:
         if not isinstance(attachments, list):

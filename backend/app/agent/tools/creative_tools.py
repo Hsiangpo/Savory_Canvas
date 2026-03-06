@@ -37,6 +37,11 @@ def build_creative_tools(runtime: Any) -> dict[str, Any]:
         return runtime.generate_images(session_id=session_id)
 
     @tool
+    def reset_progress(session_id: str, reset_to: str) -> dict[str, Any]:
+        """回退创作进度并清理指定阶段后的状态。"""
+        return runtime.reset_progress(session_id=session_id, reset_to=reset_to)
+
+    @tool
     def generate_copy(job_id: str) -> dict[str, Any]:
         """按当前任务配置执行文案生成。"""
         return runtime.generate_copy(job_id=job_id)
@@ -48,5 +53,6 @@ def build_creative_tools(runtime: Any) -> dict[str, Any]:
         "allocate_assets_to_images": allocate_assets_to_images,
         "save_style": save_style,
         "generate_images": generate_images,
+        "reset_progress": reset_progress,
         "generate_copy": generate_copy,
     }

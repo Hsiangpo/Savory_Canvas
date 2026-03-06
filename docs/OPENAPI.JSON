@@ -304,6 +304,87 @@
         }
       }
     },
+    "/api/v1/inspirations/messages/stream": {
+      "post": {
+        "tags": [
+          "Inspiration"
+        ],
+        "summary": "流式发送灵感对话消息（SSE 实时返回 Agent 思考与工具调用过程）",
+        "operationId": "postInspirationMessageStream",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "session_id"
+                ],
+                "properties": {
+                  "session_id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "selected_items": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "action": {
+                    "type": "string",
+                    "description": "Agent 语义动作标签。允许任意字符串；前端通常回传 options.items[].action_hint。"
+                  },
+                  "image_usages": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "style_reference",
+                        "content_asset"
+                      ]
+                    },
+                    "description": "与 images 按顺序对应的图片用途标签。未提供时默认 content_asset。"
+                  },
+                  "images": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    }
+                  },
+                  "videos": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE 事件流。事件类型包括 thinking、tool_start、tool_done、done、error。",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "每个事件遵循 SSE 标准格式：event: <type>\\ndata: <json>\\n\\n"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ErrorResponse"
+          }
+        }
+      }
+    },
     "/api/v1/assets/text": {
       "post": {
         "tags": [

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi.responses import StreamingResponse
 
 from backend.app.api.deps import get_inspiration_service
 from backend.app.schemas.response import InspirationConversationResponse
@@ -38,4 +39,35 @@ async def post_inspiration_message(
         image_usages=image_usages,
         images=images,
         videos=videos,
+    )
+
+
+@router.post("/inspirations/messages/stream")
+async def post_inspiration_message_stream(
+    session_id: str = Form(...),
+    text: str | None = Form(default=None),
+    selected_items: list[str] = Form(default=[]),
+    action: str | None = Form(default=None),
+    image_usages: list[Literal["style_reference", "content_asset"]] = Form(default=[]),
+    images: list[UploadFile] = File(default=[]),
+    videos: list[UploadFile] = File(default=[]),
+    service: InspirationService = Depends(get_inspiration_service),
+) -> StreamingResponse:
+    event_stream = await service.send_message_stream(
+        session_id=session_id,
+        text=text,
+        selected_items=selected_items,
+        action=action,
+        image_usages=image_usages,
+        images=images,
+        videos=videos,
+    )
+    return StreamingResponse(
+        event_stream,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

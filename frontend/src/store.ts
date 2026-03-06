@@ -14,7 +14,6 @@ interface AppState {
   latestResult: api.GenerationResult | null;
   latestStages: api.JobStage[];
   latestAssetBreakdown: api.JobAssetBreakdownResponse | null;
-  isStartingJob: boolean;
   toasts: ToastMessage[];
   draft: api.InspirationDraft | null;
   styleProfileList: api.StyleProfile[];
@@ -27,7 +26,6 @@ interface AppState {
   removeSession: (id: string) => Promise<void>;
   
   // Job Actions
-  startJob: (styleProfileId: string, imageCount: number) => Promise<void>;
   pollJobStatus: () => Promise<void>;
   cancelJob: () => Promise<void>;
   fetchResult: () => Promise<void>;
@@ -54,7 +52,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   latestResult: null,
   latestStages: [],
   latestAssetBreakdown: null,
-  isStartingJob: false,
   toasts: [],
   draft: null,
   styleProfileList: [],
@@ -202,29 +199,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (e) {
       console.error(e);
       get().addToast('删除失败', 'error');
-    }
-  },
-
-  startJob: async (styleProfileId, imageCount) => {
-    const { activeSessionId, isStartingJob } = get();
-    if (!activeSessionId) return;
-    if (isStartingJob) return;
-
-    set({ isStartingJob: true });
-    try {
-      const job = await api.createGenerationJob({
-        session_id: activeSessionId,
-        style_profile_id: styleProfileId,
-        image_count: imageCount
-      });
-      set({ latestJob: job, latestResult: null, latestStages: [], latestAssetBreakdown: null });
-    } catch (e) {
-      console.error(e);
-      const errResponse = (e as { response?: { data?: { message?: string, detail?: string } } }).response?.data;
-      const errMsg = errResponse?.message || errResponse?.detail || '创建生成任务失败，请确保模型设置正确且有足够可用资产.';
-      get().addToast(errMsg, 'error');
-    } finally {
-      set({ isStartingJob: false });
     }
   },
 

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Iterator, Literal, TypedDict
 
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -35,6 +38,7 @@ class CreativeAgent:
     db_path: Path
 
     def __post_init__(self) -> None:
+        self._stream_local = threading.local()
         workflow = StateGraph(CreativeAgentState)
         workflow.add_node("agent_node", self._agent_node)
         workflow.add_node("tool_node", self._tool_node)
@@ -69,6 +73,57 @@ class CreativeAgent:
         result["trace"] = response.get("trace") or []
         return result
 
+    def respond_stream(self, request: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        event_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+        def run_graph() -> None:
+            self._stream_local.event_queue = event_queue
+            self._stream_local.step_counter = {"value": 0}
+            try:
+                response = self._runnable.invoke(
+                    {
+                        "request": request,
+                        "input_messages": [HumanMessage(content=self._build_input_summary(request))],
+                    },
+                    config={"configurable": {"session_id": request["session_id"]}},
+                )
+                result = dict(response.get("result") or {})
+                if "reply" in result and isinstance(result.get("reply"), str):
+                    result["reply"] = result["reply"].strip()
+                decision = response.get("decision") or {}
+                if "dynamic_stage" not in result and decision.get("dynamic_stage") is not None:
+                    result["dynamic_stage"] = decision.get("dynamic_stage")
+                if "dynamic_stage_label" not in result and decision.get("dynamic_stage_label") is not None:
+                    result["dynamic_stage_label"] = decision.get("dynamic_stage_label")
+                result["trace"] = response.get("trace") or []
+                event_queue.put(("result", result))
+            except Exception as exc:
+                event_queue.put(("error", exc))
+            finally:
+                if hasattr(self._stream_local, "event_queue"):
+                    delattr(self._stream_local, "event_queue")
+                if hasattr(self._stream_local, "step_counter"):
+                    delattr(self._stream_local, "step_counter")
+                event_queue.put(("end", None))
+
+        worker = threading.Thread(target=run_graph, daemon=True)
+        worker.start()
+
+        while True:
+            event_type, payload = event_queue.get()
+            if event_type == "sse":
+                yield payload
+                continue
+            if event_type == "result":
+                yield {"event": "result", "data": payload}
+                break
+            if event_type == "error":
+                message = str(payload) or "Agent 执行异常"
+                yield {"event": "error", "data": {"code": "E-1099", "message": message}}
+                break
+            if event_type == "end":
+                break
+
     def _invoke_graph(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._graph.invoke(payload)
 
@@ -80,6 +135,16 @@ class CreativeAgent:
         model = self.llm_provider.build_chat_model()
         request = state.get("request") or {}
         tool_call_count = int(state.get("tool_call_count") or 0)
+        step = self._next_step()
+        self._emit_stream_event(
+            {
+                "event": "thinking",
+                "data": {
+                    "step": step,
+                    "message": self._thinking_message(request),
+                },
+            }
+        )
         messages = [
             SystemMessage(content=self._build_system_prompt()),
             *state.get("history_messages", []),
@@ -116,11 +181,37 @@ class CreativeAgent:
         decision = state.get("decision") or {}
         request = state.get("request") or {}
         tool_name = str(decision.get("tool_name") or "").strip()
-        tool_args = decision.get("tool_args") if isinstance(decision.get("tool_args"), dict) else {}
+        tool_args = dict(decision.get("tool_args") or {}) if isinstance(decision.get("tool_args"), dict) else {}
+        if tool_name == "suggest_painting_style" and request.get("session_id"):
+            tool_args["session_id"] = request["session_id"]
         tool = self.tools.get(tool_name)
         if tool is None:
             raise ValueError(f"未知工具: {tool_name}")
+        step = self._next_step()
+        self._emit_stream_event(
+            {
+                "event": "tool_start",
+                "data": {
+                    "step": step,
+                    "tool_name": tool_name,
+                    "message": self._tool_start_message(tool_name),
+                },
+            }
+        )
+        started_at = time.perf_counter()
         tool_result = tool.invoke(tool_args)
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        self._emit_stream_event(
+            {
+                "event": "tool_done",
+                "data": {
+                    "step": step,
+                    "tool_name": tool_name,
+                    "message": self._tool_done_message(tool_name, tool_result),
+                    "duration_ms": duration_ms,
+                },
+            }
+        )
         trace = list(state.get("trace") or [])
         if trace:
             trace[-1] = {**trace[-1], "status": "completed"}
@@ -353,3 +444,81 @@ class CreativeAgent:
         if isinstance(fallback, int) and 0 <= fallback <= 100:
             return fallback
         return None
+
+    def _emit_stream_event(self, event: dict[str, Any]) -> None:
+        stream_queue = getattr(self._stream_local, "event_queue", None)
+        if stream_queue is None:
+            return
+        stream_queue.put(("sse", event))
+
+    def _next_step(self) -> int:
+        counter = getattr(self._stream_local, "step_counter", None)
+        if counter is None:
+            return 0
+        counter["value"] += 1
+        return int(counter["value"])
+
+    def _thinking_message(self, request: dict[str, Any]) -> str:
+        if request.get("last_tool_name"):
+            return "正在组织下一步..."
+        return "正在思考..."
+
+    def _tool_start_message(self, tool_name: str) -> str:
+        mapping = {
+            "suggest_painting_style": "正在分析适合的绘画风格...",
+            "extract_assets": "正在提取素材...",
+            "generate_style_prompt": "正在生成提示词...",
+            "allocate_assets_to_images": "正在规划分图方案...",
+            "save_style": "正在保存风格...",
+            "generate_images": "正在创建生成任务...",
+            "reset_progress": "正在回退进度...",
+            "generate_copy": "正在生成文案...",
+        }
+        return mapping.get(tool_name, f"正在执行 {tool_name}...")
+
+    def _tool_done_message(self, tool_name: str, tool_result: Any) -> str:
+        if tool_name == "suggest_painting_style":
+            return "风格分析完成"
+        if tool_name == "extract_assets":
+            if isinstance(tool_result, dict):
+                keywords = self._asset_summary_keywords(tool_result)
+                if keywords:
+                    return f"已提取素材：{'、'.join(keywords)}"
+            return "已提取素材"
+        if tool_name == "generate_style_prompt":
+            return "提示词已就绪"
+        if tool_name == "allocate_assets_to_images":
+            plan = tool_result if isinstance(tool_result, list) else []
+            count = len(plan)
+            return f"已生成 {count} 张图的分配方案" if count else "已生成分图方案"
+        if tool_name == "save_style":
+            if isinstance(tool_result, dict):
+                style_name = str(tool_result.get("style_name") or "").strip()
+                if style_name:
+                    return f"风格「{style_name}」已保存"
+            return "风格已保存"
+        if tool_name == "generate_images":
+            return "图片生成任务已启动"
+        if tool_name == "reset_progress":
+            if isinstance(tool_result, dict):
+                stage = str(tool_result.get("stage") or "").strip()
+                if stage:
+                    return f"已回退到{stage}阶段"
+            return "已回退到指定阶段"
+        if tool_name == "generate_copy":
+            return "文案生成任务已启动"
+        return f"{tool_name} 执行完成"
+
+    def _asset_summary_keywords(self, tool_result: dict[str, Any]) -> list[str]:
+        summary: list[str] = []
+        for key in ("foods", "scenes", "locations", "keywords"):
+            values = tool_result.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                text = str(value or "").strip()
+                if text and text not in summary:
+                    summary.append(text)
+                if len(summary) >= 3:
+                    return summary
+        return summary

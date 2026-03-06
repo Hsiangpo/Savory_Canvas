@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import UploadFile
 
@@ -77,56 +77,84 @@ class InspirationService(InspirationFlowMixin):
         images: list[UploadFile],
         videos: list[UploadFile],
     ) -> dict[str, Any]:
-        session = self.session_repo.get(session_id)
-        if not session:
-            raise not_found("会话", session_id)
-        state = self._ensure_state(session_id)
-        self._ingest_ready_transcripts(session_id, state)
-        self._ensure_welcome_message(session_id, state)
-
-        normalized_text = (text or "").strip()
-        normalized_items = self._normalize_selected_items(selected_items)
-        normalized_action = (action or "").strip() or None
-        if not normalized_text and not normalized_items and not normalized_action and not images and not videos:
-            raise DomainError(code="E-1099", message="请输入内容或选择选项", status_code=400)
-
-        if images:
-            self._ensure_vision_capable()
-
-        attachments = await self._save_attachments(
+        prepared = await self._prepare_message_context(
             session_id=session_id,
-            text=normalized_text,
+            text=text,
+            selected_items=selected_items,
+            action=action,
             image_usages=image_usages,
             images=images,
             videos=videos,
         )
-        if normalized_action == "use_style_profile":
-            user_content, attachments = self._build_use_style_profile_user_message(
-                user_text=normalized_text,
-                selected_items=normalized_items,
-                attachments=attachments,
-            )
-        else:
-            user_content = self._build_user_message(normalized_text, normalized_items, attachments)
-        self._append_message(
-            session_id=session_id,
-            role="user",
-            content=user_content,
-            stage=state["stage"],
-            attachments=attachments,
-            options=None,
-            fallback_used=False,
-        )
         agent_turn = self._run_agent_turn(
-            session=session,
-            state=state,
-            text=normalized_text,
-            selected_items=normalized_items,
-            action=normalized_action,
-            attachments=attachments,
+            session=prepared["session"],
+            state=prepared["state"],
+            text=prepared["normalized_text"],
+            selected_items=prepared["normalized_items"],
+            action=prepared["normalized_action"],
+            attachments=prepared["attachments"],
         )
-        self._apply_agent_turn(session_id=session_id, state=state, turn=agent_turn)
-        return self._build_response(session_id, state)
+        self._apply_agent_turn(session_id=session_id, state=prepared["state"], turn=agent_turn)
+        return self._build_response(session_id, prepared["state"])
+
+    async def send_message_stream(
+        self,
+        *,
+        session_id: str,
+        text: str | None,
+        selected_items: list[str],
+        action: str | None,
+        image_usages: list[str],
+        images: list[UploadFile],
+        videos: list[UploadFile],
+    ) -> Iterator[str]:
+        prepared = await self._prepare_message_context(
+            session_id=session_id,
+            text=text,
+            selected_items=selected_items,
+            action=action,
+            image_usages=image_usages,
+            images=images,
+            videos=videos,
+        )
+        request_payload = self._build_agent_request_payload(
+            session=prepared["session"],
+            state=prepared["state"],
+            text=prepared["normalized_text"],
+            selected_items=prepared["normalized_items"],
+            action=prepared["normalized_action"],
+            attachments=prepared["attachments"],
+        )
+
+        def event_stream() -> Iterator[str]:
+            try:
+                if not self.creative_agent:
+                    raise DomainError(code="E-1006", message="Agent 模式尚未初始化", status_code=503)
+                for event in self.creative_agent.respond_stream(request_payload):
+                    event_type = str(event.get("event") or "").strip()
+                    data = event.get("data")
+                    if event_type == "result":
+                        self._apply_agent_turn(session_id=session_id, state=prepared["state"], turn=dict(data or {}))
+                        response = self._build_response(session_id, prepared["state"])
+                        yield self._format_sse_event("done", response)
+                        return
+                    if event_type == "error":
+                        payload = data if isinstance(data, dict) else {"code": "E-1099", "message": "Agent 执行异常"}
+                        if "code" not in payload:
+                            payload["code"] = "E-1099"
+                        if "message" not in payload:
+                            payload["message"] = "Agent 执行异常"
+                        yield self._format_sse_event("error", payload)
+                        return
+                    if event_type:
+                        yield self._format_sse_event(event_type, data or {})
+            except DomainError as exc:
+                yield self._format_sse_event("error", {"code": exc.code, "message": exc.message})
+            except Exception:
+                logger.exception("灵感对话 SSE 流执行失败: session_id=%s", session_id)
+                yield self._format_sse_event("error", {"code": "E-1099", "message": "Agent 执行异常"})
+
+        return event_stream()
 
     def _run_agent_turn(
         self,
@@ -140,8 +168,28 @@ class InspirationService(InspirationFlowMixin):
     ) -> dict[str, Any]:
         if not self.creative_agent:
             raise DomainError(code="E-1006", message="Agent 模式尚未初始化", status_code=503)
+        request_payload = self._build_agent_request_payload(
+            session=session,
+            state=state,
+            text=text,
+            selected_items=selected_items,
+            action=action,
+            attachments=attachments,
+        )
+        return self.creative_agent.respond(request_payload)
+
+    def _build_agent_request_payload(
+        self,
+        *,
+        session: dict[str, Any],
+        state: dict[str, Any],
+        text: str,
+        selected_items: list[str],
+        action: str | None,
+        attachments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         selected_style_profile = self._resolve_selected_style_profile(action=action, selected_items=selected_items)
-        request_payload = {
+        return {
             "session_id": session["id"],
             "text": text,
             "selected_items": selected_items,
@@ -164,11 +212,6 @@ class InspirationService(InspirationFlowMixin):
                 "active_job_id": state.get("active_job_id"),
             },
         }
-        self._active_agent_session_id = session["id"]
-        try:
-            return self.creative_agent.respond(request_payload)
-        finally:
-            self._active_agent_session_id = None
 
     def _apply_agent_turn(
         self,
@@ -296,10 +339,77 @@ class InspirationService(InspirationFlowMixin):
             return fallback
         return None
 
-    def suggest_painting_style(self, *, stage: str, user_reply: str, selected_items: list[str]) -> dict[str, Any]:
-        session_id = str(getattr(self, "_active_agent_session_id", "") or "").strip()
-        if not session_id:
-            raise DomainError(code="E-1099", message="Agent 缺少会话上下文", status_code=500)
+    async def _prepare_message_context(
+        self,
+        *,
+        session_id: str,
+        text: str | None,
+        selected_items: list[str],
+        action: str | None,
+        image_usages: list[str],
+        images: list[UploadFile],
+        videos: list[UploadFile],
+    ) -> dict[str, Any]:
+        session = self.session_repo.get(session_id)
+        if not session:
+            raise not_found("会话", session_id)
+        state = self._ensure_state(session_id)
+        self._ingest_ready_transcripts(session_id, state)
+        self._ensure_welcome_message(session_id, state)
+
+        normalized_text = (text or "").strip()
+        normalized_items = self._normalize_selected_items(selected_items)
+        normalized_action = (action or "").strip() or None
+        if not normalized_text and not normalized_items and not normalized_action and not images and not videos:
+            raise DomainError(code="E-1099", message="请输入内容或选择选项", status_code=400)
+
+        if images:
+            self._ensure_vision_capable()
+
+        attachments = await self._save_attachments(
+            session_id=session_id,
+            text=normalized_text,
+            image_usages=image_usages,
+            images=images,
+            videos=videos,
+        )
+        if normalized_action == "use_style_profile":
+            user_content, attachments = self._build_use_style_profile_user_message(
+                user_text=normalized_text,
+                selected_items=normalized_items,
+                attachments=attachments,
+            )
+        else:
+            user_content = self._build_user_message(normalized_text, normalized_items, attachments)
+        self._append_message(
+            session_id=session_id,
+            role="user",
+            content=user_content,
+            stage=state["stage"],
+            attachments=attachments,
+            options=None,
+            fallback_used=False,
+        )
+        return {
+            "session": session,
+            "state": state,
+            "normalized_text": normalized_text,
+            "normalized_items": normalized_items,
+            "normalized_action": normalized_action,
+            "attachments": attachments,
+        }
+
+    def _format_sse_event(self, event_type: str, data: Any) -> str:
+        return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def suggest_painting_style(
+        self,
+        *,
+        session_id: str,
+        stage: str,
+        user_reply: str,
+        selected_items: list[str],
+    ) -> dict[str, Any]:
         return self.style_service.chat(
             session_id=session_id,
             stage=stage,
@@ -349,6 +459,15 @@ class InspirationService(InspirationFlowMixin):
         state = self._ensure_state(session_id)
         if not self.generation_worker:
             raise DomainError(code="E-1099", message="生成 Worker 不可用", status_code=500)
+        existing_job_id = str(state.get("active_job_id") or "").strip()
+        if existing_job_id:
+            existing_job = self.generation_worker.job_repo.get(existing_job_id)
+            if existing_job and existing_job.get("status") not in {"success", "partial_success", "failed", "canceled"}:
+                return {
+                    "job_id": existing_job_id,
+                    "status": existing_job["status"],
+                    "already_running": True,
+                }
         allocation_plan = state.get("allocation_plan")
         if not isinstance(allocation_plan, list) or not allocation_plan:
             raise DomainError(code="E-1099", message="当前草案还没有可生成的分图规划", status_code=400)

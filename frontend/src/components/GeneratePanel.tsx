@@ -1,4 +1,4 @@
-import { Play, Loader2, XCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import { Loader2, XCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useEffect, useState, useMemo } from 'react';
 import * as api from '../api';
@@ -66,7 +66,7 @@ function normalizeStageName(stageName: string): string {
 }
 
 export default function GeneratePanel() {
-  const { latestJob, startJob, cancelJob, pollJobStatus, activeSessionId, addToast, draft, latestStages, isStartingJob, latestAssetBreakdown } = useAppStore();
+  const { latestJob, cancelJob, pollJobStatus, draft, latestStages, latestAssetBreakdown } = useAppStore();
   const [stagesExpanded, setStagesExpanded] = useState(true);
 
   const isRunning = latestJob?.status === 'running' || latestJob?.status === 'queued';
@@ -130,27 +130,6 @@ export default function GeneratePanel() {
     }
     return null; // all success means done
   }, [groupedStages, status]);
-
-  const handleStart = () => {
-    if (!activeSessionId) {
-      addToast('请先选择或创建一个会话', 'error');
-      return;
-    }
-    if (draft?.locked) {
-      if (!draft.draft_style_id) {
-        addToast('锁定草案中未找到生成使用的风格', 'error');
-        return;
-      }
-      if (!draft.image_count) {
-        addToast('锁定草案中未找到生成使用的图片数量', 'error');
-        return;
-      }
-      startJob(draft.draft_style_id, draft.image_count);
-      return;
-    }
-
-    addToast('请先完成灵感对话确认草案并锁定', 'error');
-  };
 
   return (
     <div className="generate-panel-container">
@@ -352,25 +331,24 @@ export default function GeneratePanel() {
         )}
       </div>
 
-      <div style={{ display: 'flex', gap: '12px' }}>
-        <button 
-          className="btn btn-primary" 
-          style={{ flex: 1 }} 
-          disabled={isRunning || isStartingJob || !activeSessionId || !draft?.locked}
-          onClick={handleStart}
-        >
-          {isRunning || isStartingJob ? <><Loader2 size={16} className="animate-spin" /> 生成中...</> : <><Play size={16} /> 开始生成</>}
-        </button>
-        {isRunning && (
-          <button 
-            className="btn btn-secondary" 
-            onClick={cancelJob}
-            title="取消任务"
-          >
-            <XCircle size={18} color="var(--error)" />
+      {status === 'idle' && (
+        <div style={{
+          textAlign: 'center',
+          color: 'var(--text-secondary)',
+          fontSize: '0.85rem',
+          padding: '16px 0',
+        }}>
+          Agent 会在创作方案确认后自动启动生成
+        </div>
+      )}
+
+      {isRunning && (
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0' }}>
+          <button className="btn btn-secondary" onClick={cancelJob} title="取消任务">
+            <XCircle size={18} color="var(--error)" /> 取消生成
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

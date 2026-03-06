@@ -160,6 +160,45 @@ export interface InspirationConversationResponse {
   agent?: InspirationAgentMeta | null;
 }
 
+export interface StreamThinkingEvent {
+  type: 'thinking';
+  step: number;
+  message: string;
+}
+
+export interface StreamToolStartEvent {
+  type: 'tool_start';
+  step: number;
+  tool_name: string;
+  message: string;
+}
+
+export interface StreamToolDoneEvent {
+  type: 'tool_done';
+  step: number;
+  tool_name: string;
+  message: string;
+  duration_ms: number;
+}
+
+export interface StreamErrorEvent {
+  type: 'error';
+  code: string;
+  message: string;
+}
+
+export interface StreamDoneEvent {
+  type: 'done';
+  data: InspirationConversationResponse;
+}
+
+export type StreamEvent =
+  | StreamThinkingEvent
+  | StreamToolStartEvent
+  | StreamToolDoneEvent
+  | StreamErrorEvent
+  | StreamDoneEvent;
+
 
 export interface StyleProfile {
   id: string;
@@ -331,6 +370,99 @@ export const postInspirationMessage = (data: {
     data.videos.forEach(v => formData.append('videos', v));
   }
   return api.post<InspirationConversationResponse>('/inspirations/messages', formData).then(res => res.data);
+};
+
+export const postInspirationMessageStream = async (
+  data: {
+    session_id: string,
+    text?: string,
+    selected_items?: string[],
+    action?: string,
+    images?: File[],
+    videos?: File[]
+  },
+  onEvent: (event: StreamEvent) => void
+) => {
+  const formData = new FormData();
+  formData.append('session_id', data.session_id);
+  if (data.text) formData.append('text', data.text);
+  if (data.action) formData.append('action', data.action);
+  if (data.selected_items) {
+    data.selected_items.forEach(i => formData.append('selected_items', i));
+  }
+  if (data.images) {
+    data.images.forEach(i => formData.append('images', i));
+  }
+  if (data.videos) {
+    data.videos.forEach(v => formData.append('videos', v));
+  }
+
+  const response = await fetch(`${API_BASE_URL}/inspirations/messages/stream`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    let errorData;
+    try {
+      errorData = await response.json();
+    } catch {
+      // Ignore JSON parse error if response is not JSON
+    }
+    const err = new Error(`HTTP error! status: ${response.status}`) as Error & { response?: { data?: unknown } };
+    if (errorData) {
+      err.response = { data: errorData };
+    }
+    throw err;
+  }
+
+  if (!response.body) {
+    throw new Error('ReadableStream not yet supported in this browser.');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    
+    let boundary = buffer.indexOf('\n\n');
+    while (boundary !== -1) {
+      const chunk = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      
+      const lines = chunk.split('\n');
+      let currentEvent = 'message';
+      let currentData = '';
+      
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          currentEvent = line.substring(6).trim();
+        } else if (line.startsWith('data:')) {
+          currentData += (currentData ? '\n' : '') + line.substring(5).trim();
+        }
+      }
+      
+      if (currentData) {
+        try {
+          const parsedData = JSON.parse(currentData);
+          if (currentEvent === 'done') {
+            onEvent({ type: 'done', data: parsedData });
+          } else {
+            onEvent({ type: currentEvent as 'thinking' | 'tool_start' | 'tool_done' | 'error', ...parsedData });
+          }
+        } catch (e) {
+          console.error('Failed to parse SSE data', e);
+        }
+      }
+      
+      boundary = buffer.indexOf('\n\n');
+    }
+  }
 };
 
 

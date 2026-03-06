@@ -7,9 +7,14 @@ from langchain.tools import tool
 
 def build_creative_tools(runtime: Any) -> dict[str, Any]:
     @tool
-    def suggest_painting_style(stage: str, user_reply: str, selected_items: list[str]) -> dict[str, Any]:
+    def suggest_painting_style(session_id: str, stage: str, user_reply: str, selected_items: list[str]) -> dict[str, Any]:
         """根据当前风格收集阶段，生成下一轮风格对话建议。"""
-        return runtime.suggest_painting_style(stage=stage, user_reply=user_reply, selected_items=selected_items)
+        return runtime.suggest_painting_style(
+            session_id=session_id,
+            stage=stage,
+            user_reply=user_reply,
+            selected_items=selected_items,
+        )
 
     @tool
     def extract_assets(session_id: str, user_hint: str, style_prompt: str) -> dict[str, Any]:

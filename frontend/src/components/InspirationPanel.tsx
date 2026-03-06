@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Palette, Wand2 } from 'lucide-react';
 import { useAppStore } from '../store';
 import * as api from '../api';
-import { getErrorMessage } from '../getErrorMessage';
 import { CandidateEditor } from './CandidateEditor';
 import { ChatInput, type PendingUploadFile } from './ChatInput';
 import { ChatMessageItem } from './ChatMessage';
 import StyleManagementDrawer from './StyleManagementDrawer';
+import { ThinkingBubble, type ThinkingStep } from './ThinkingBubble';
 
 interface SendDisplayOverride {
   content: string;
@@ -49,6 +49,8 @@ export default function InspirationPanel() {
   const { activeSessionId, addToast, draft, setDraft, syncLatestJob } = useAppStore();
   const [messages, setMessages] = useState<api.InspirationMessage[]>([]);
   const [agentMeta, setAgentMeta] = useState<api.InspirationAgentMeta | null>(null);
+  const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [inputText, setInputText] = useState('');
   const [pendingFiles, setPendingFiles] = useState<PendingUploadFile[]>([]);
@@ -122,6 +124,8 @@ export default function InspirationPanel() {
   useEffect(() => {
     sessionIdRef.current = activeSessionId;
     setIsLoading(false);
+    setIsStreaming(false);
+    setThinkingSteps([]);
     setMessages([]);
     setDraft(null);
     setAgentMeta(null);
@@ -150,6 +154,12 @@ export default function InspirationPanel() {
       container.scrollTop = container.scrollHeight;
     }
   }, [messages]);
+
+  useEffect(() => {
+    const container = chatRef.current;
+    if (!container || thinkingSteps.length === 0) return;
+    container.scrollTop = container.scrollHeight;
+  }, [thinkingSteps]);
 
   useEffect(() => {
     const element = inputTextRef.current;
@@ -269,36 +279,70 @@ export default function InspirationPanel() {
     setInputText('');
     setPendingFiles([]);
     setIsLoading(true);
+    setIsStreaming(true);
+    setThinkingSteps([]);
     const requestSessionId = activeSessionId;
 
     try {
-      const response = await api.postInspirationMessage({
+      const requestPayload = {
         session_id: activeSessionId,
         text,
         selected_items: selection,
         action: actionStr,
         images: imageUploads.length ? imageUploads.map((item) => item.file) : undefined,
         videos: videoUploads.length ? videoUploads.map((item) => item.file) : undefined,
+      };
+
+      await api.postInspirationMessageStream(requestPayload, (event) => {
+        if (sessionIdRef.current !== requestSessionId) return;
+        
+        if (event.type === 'thinking' || event.type === 'tool_start' || event.type === 'tool_done') {
+          setThinkingSteps((prev) => [
+            ...prev,
+            {
+              id: `${Date.now()}-${Math.random()}`,
+              type: event.type as 'thinking' | 'tool_start' | 'tool_done',
+              message: event.message,
+              toolName: 'tool_name' in event ? event.tool_name : undefined,
+              durationMs: 'duration_ms' in event ? event.duration_ms : undefined,
+              timestamp: Date.now(),
+            }
+          ]);
+          setTimeout(() => {
+            if (chatRef.current) {
+              chatRef.current.scrollTop = chatRef.current.scrollHeight;
+            }
+          }, 50);
+        } else if (event.type === 'done') {
+          const response = event.data;
+          setMessages(response.messages || []);
+          setDraft(response.draft || null);
+          setAgentMeta(response.agent || null);
+          if (response.draft?.active_job_id) {
+            void syncLatestJob(response.draft.active_job_id);
+          }
+        } else if (event.type === 'error') {
+          addToast(`Agent 错误: ${event.message}`, 'error');
+          fetchConversation(requestSessionId);
+        }
       });
-      if (sessionIdRef.current !== requestSessionId) return;
-      setMessages(response.messages || []);
-      setDraft(response.draft || null);
-      setAgentMeta(response.agent || null);
-      if (response.draft?.active_job_id) {
-        void syncLatestJob(response.draft.active_job_id);
-      }
     } catch (error) {
       if (sessionIdRef.current !== requestSessionId) return;
+      console.warn('Stream failed or transport error:', error);
       const typedError = error as { response?: { data?: { code?: string } } };
       if (typedError.response?.data?.code === 'E-1010') {
         addToast('当前模型不支持图片解析，请切换为视觉模型后重试。', 'error');
       } else {
-        addToast(getErrorMessage(error), 'error');
+        addToast('流式连接异常，已同步最新会话状态', 'error');
       }
       fetchConversation(requestSessionId);
     } finally {
       revokePreviewUrls(pendingSnapshot);
-      if (sessionIdRef.current === requestSessionId) setIsLoading(false);
+      if (sessionIdRef.current === requestSessionId) {
+        setIsLoading(false);
+        setIsStreaming(false);
+        setThinkingSteps([]);
+      }
     }
   };
 
@@ -391,10 +435,14 @@ export default function InspirationPanel() {
               />
             ))}
 
-            {isLoading && (
+            {isLoading && !isStreaming && (
               <div className="chat-bubble bot">
                 <Loader2 size={16} className="animate-spin" /> Agent 正在思考...
               </div>
+            )}
+
+            {isStreaming && (
+              <ThinkingBubble steps={thinkingSteps} isActive={true} />
             )}
           </div>
 

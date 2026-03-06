@@ -42,6 +42,25 @@ class _ToolStub:
         return self._fn(args)
 
 
+def _parse_sse_body(body: str) -> list[dict[str, Any]]:
+    normalized = body.replace("\r\n", "\n")
+    events: list[dict[str, Any]] = []
+    for chunk in normalized.split("\n\n"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        lines = chunk.split("\n")
+        event_type = ""
+        data = ""
+        for line in lines:
+            if line.startswith("event:"):
+                event_type = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                data = line.split(":", 1)[1].strip()
+        events.append({"event": event_type, "data": json.loads(data) if data else None})
+    return events
+
+
 def test_create_app_ignores_legacy_cli_flag_and_always_initializes_agent(tmp_path, monkeypatch):
     monkeypatch.setenv("SAVORY_CANVAS_DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("SAVORY_CANVAS_STORAGE_DIR", str(tmp_path / "storage"))
@@ -135,6 +154,40 @@ def test_creative_agent_tool_node_raises_value_error_for_unknown_tool():
         assert "未知工具" in str(exc)
     else:
         raise AssertionError("unknown tool should raise ValueError")
+
+
+def test_creative_agent_tool_node_force_overrides_suggest_style_session_id():
+    from backend.app.agent.creative_agent import CreativeAgent
+    import threading
+
+    observed: dict[str, Any] = {}
+    agent = CreativeAgent.__new__(CreativeAgent)
+    agent._stream_local = threading.local()
+    agent.tools = {
+        "suggest_painting_style": _ToolStub(lambda args: observed.update(args) or {"reply": "ok"}),
+    }
+
+    result = agent._tool_node(
+        {
+            "decision": {
+                "tool_name": "suggest_painting_style",
+                "tool_args": {
+                    "session_id": "wrong-session",
+                    "stage": "painting_style",
+                    "user_reply": "我想做西安攻略",
+                    "selected_items": [],
+                },
+            },
+            "request": {
+                "session_id": "correct-session",
+                "state": {"stage": "initial_understanding", "locked": False},
+            },
+            "trace": [],
+        }
+    )
+
+    assert observed["session_id"] == "correct-session"
+    assert result["tool_call_count"] == 1
 
 
 def test_creative_agent_capture_tool_output_returns_structured_data_only():
@@ -236,6 +289,51 @@ def test_creative_agent_multi_tool_roundtrip_accumulates_tool_history(tmp_path):
     assert result["reply"].startswith("我已经把素材整理好")
     assert result["options"]["items"][0]["action_hint"] == "revise"
     assert result["progress"] == 100
+
+
+def test_creative_agent_respond_stream_emits_thinking_before_tool(tmp_path):
+    from backend.app.agent.creative_agent import CreativeAgent
+
+    decisions = [
+        {
+            "decision": "use_tool",
+            "reason": "先提取素材。",
+            "tool_name": "extract_assets",
+            "tool_args": {"session_id": "session-1", "user_hint": "西安攻略", "style_prompt": ""},
+        },
+        {
+            "decision": "respond_directly",
+            "reason": "素材提取完成，向用户汇报。",
+            "result": {
+                "reply": "我先把素材整理出来了。",
+                "stage": "asset_ready",
+                "locked": False,
+                "progress": 50,
+                "progress_label": "素材已整理",
+            },
+        },
+    ]
+    agent = CreativeAgent(
+        llm_provider=_FakeLLMProvider(decisions),
+        tools={"extract_assets": _ToolStub(lambda _: {"foods": ["羊肉泡馍"], "scenes": ["城墙"], "keywords": ["西安攻略"]})},
+        db_path=tmp_path / "agent.db",
+    )
+
+    events = list(
+        agent.respond_stream(
+            {
+                "session_id": "session-1",
+                "text": "我要做西安攻略",
+                "selected_items": [],
+                "attachments": [],
+                "state": {"stage": "initial_understanding", "locked": False},
+            }
+        )
+    )
+
+    assert [event["event"] for event in events] == ["thinking", "tool_start", "tool_done", "thinking", "result"]
+    assert events[1]["data"]["tool_name"] == "extract_assets"
+    assert events[2]["data"]["duration_ms"] >= 0
 
 
 def test_creative_agent_system_prompt_loaded_from_external_file():
@@ -385,6 +483,28 @@ def test_inspiration_service_generate_images_can_auto_start_when_ready_without_l
     assert job["image_count"] == 2
 
 
+def test_generate_images_prevents_duplicate_job(client, monkeypatch):
+    session = create_session(client, content_mode="food_scenic")
+    style = create_style(client, session["id"], {"painting_style": "自然写实"})
+    service = client.app.state.services.inspiration
+    state = service._ensure_state(session["id"])
+    state["stage"] = "allocation_ready"
+    state["image_count"] = 2
+    state["allocation_plan"] = [{"slot_index": 1, "focus_title": "城墙主图", "focus_description": "突出城墙。"}]
+    state["draft_style_id"] = style["id"]
+    service.inspiration_repo.upsert_state(state)
+
+    scheduled_job_ids: list[str] = []
+    monkeypatch.setattr(service.generation_worker, "schedule", lambda job_id: scheduled_job_ids.append(job_id))
+
+    first_result = service.generate_images(session_id=session["id"])
+    second_result = service.generate_images(session_id=session["id"])
+
+    assert first_result["job_id"] == second_result["job_id"]
+    assert second_result["already_running"] is True
+    assert len(scheduled_job_ids) == 1
+
+
 def test_inspiration_service_reset_progress_clears_state_by_scope(client):
     session = create_session(client)
     style = create_style(client, session["id"], {"painting_style": "复古手账"})
@@ -492,3 +612,270 @@ def test_inspiration_progress_can_move_from_zero_to_hundred(client, monkeypatch)
         progress_values.append(response.json()["draft"]["progress"])
 
     assert progress_values == [10, 35, 78, 100]
+
+
+def test_stream_endpoint_returns_sse_events(client, monkeypatch):
+    session = create_session(client)
+    service = client.app.state.services.inspiration
+
+    monkeypatch.setattr(
+        service.creative_agent,
+        "respond_stream",
+        lambda payload: iter(
+            [
+                {"event": "thinking", "data": {"step": 1, "message": "正在思考..."}},
+                {"event": "tool_start", "data": {"step": 2, "tool_name": "extract_assets", "message": "正在提取素材..."}},
+                {"event": "tool_done", "data": {"step": 2, "tool_name": "extract_assets", "message": "已提取素材：羊肉泡馍", "duration_ms": 12}},
+                {
+                    "event": "result",
+                    "data": {
+                        "reply": "我已经把素材整理好了。",
+                        "stage": "asset_ready",
+                        "locked": False,
+                        "progress": 52,
+                        "progress_label": "素材已整理",
+                        "options": {"items": [{"label": "继续分图", "action_hint": "continue_allocation"}]},
+                    },
+                },
+            ]
+        ),
+    )
+
+    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "西安攻略"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse_body(response.text)
+    assert [event["event"] for event in events] == ["thinking", "tool_start", "tool_done", "done"]
+
+
+def test_stream_emits_thinking_before_tool(client, monkeypatch):
+    session = create_session(client)
+    service = client.app.state.services.inspiration
+
+    monkeypatch.setattr(
+        service.creative_agent,
+        "respond_stream",
+        lambda payload: iter(
+            [
+                {"event": "thinking", "data": {"step": 1, "message": "正在思考..."}},
+                {"event": "tool_start", "data": {"step": 2, "tool_name": "generate_style_prompt", "message": "正在生成提示词..."}},
+                {"event": "tool_done", "data": {"step": 2, "tool_name": "generate_style_prompt", "message": "提示词已就绪", "duration_ms": 10}},
+                {"event": "result", "data": {"reply": "提示词我已经整理好了。", "stage": "prompt_ready", "locked": False}},
+            ]
+        ),
+    )
+
+    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "继续"})
+    events = _parse_sse_body(response.text)
+
+    assert events[0]["event"] == "thinking"
+    assert events[1]["event"] == "tool_start"
+    assert events[2]["event"] == "tool_done"
+
+
+def test_stream_done_contains_full_response(client, monkeypatch):
+    session = create_session(client)
+    service = client.app.state.services.inspiration
+
+    monkeypatch.setattr(
+        service.creative_agent,
+        "respond_stream",
+        lambda payload: iter(
+            [
+                {
+                    "event": "result",
+                    "data": {
+                        "reply": "我已经帮你整理好下一步方向啦。",
+                        "stage": "style_ready",
+                        "locked": False,
+                        "progress": 30,
+                        "progress_label": "风格确定",
+                        "options": {"items": [{"label": "继续提取素材", "action_hint": "extract_assets"}]},
+                    },
+                }
+            ]
+        ),
+    )
+
+    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "想做西安攻略"})
+    events = _parse_sse_body(response.text)
+
+    assert events[-1]["event"] == "done"
+    done_payload = events[-1]["data"]
+    assert done_payload["session_id"] == session["id"]
+    assert done_payload["draft"]["stage"] == "style_ready"
+    assert done_payload["draft"]["progress"] == 30
+    assert done_payload["messages"][-1]["content"] == "我已经帮你整理好下一步方向啦。"
+
+
+def test_stream_error_on_agent_failure(client, monkeypatch):
+    session = create_session(client)
+    service = client.app.state.services.inspiration
+
+    def raising_stream(payload):
+        raise RuntimeError("agent stream boom")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(service.creative_agent, "respond_stream", raising_stream)
+
+    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "继续"})
+    events = _parse_sse_body(response.text)
+
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["code"] == "E-1099"
+
+
+def test_stream_suggest_painting_style_uses_request_session_id(client, monkeypatch, tmp_path):
+    from backend.app.agent.creative_agent import CreativeAgent
+    from backend.app.agent.tools import build_creative_tools
+
+    session = create_session(client)
+    service = client.app.state.services.inspiration
+    observed_session_ids: list[str] = []
+
+    monkeypatch.setattr(
+        service.style_service,
+        "chat",
+        lambda *, session_id, stage, user_reply, selected_items: (
+            observed_session_ids.append(session_id)
+            or {
+                "reply": "我先帮你梳理风格方向。",
+                "options": {"title": "请选择", "items": ["自然写实"], "max": 1},
+                "stage": stage,
+                "next_stage": stage,
+                "is_finished": False,
+                "fallback_used": False,
+            }
+        ),
+    )
+
+    agent = CreativeAgent(
+        llm_provider=_FakeLLMProvider(
+            [
+                {
+                    "decision": "use_tool",
+                    "reason": "先给出风格建议。",
+                    "tool_name": "suggest_painting_style",
+                    "tool_args": {
+                        "session_id": "wrong-session",
+                        "stage": "painting_style",
+                        "user_reply": "我想做西安攻略",
+                        "selected_items": [],
+                    },
+                },
+                {
+                    "decision": "respond_directly",
+                    "reason": "风格建议已经完成。",
+                    "result": {
+                        "reply": "我已经拿到风格建议了。",
+                        "stage": "style_ready",
+                        "locked": False,
+                        "progress": 22,
+                        "progress_label": "风格分析",
+                        "options": {"items": [{"label": "继续", "action_hint": "continue"}]},
+                    },
+                },
+            ]
+        ),
+        tools=build_creative_tools(service),
+        db_path=tmp_path / "stream-agent.db",
+    )
+    monkeypatch.setattr(service, "creative_agent", agent)
+
+    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "我想做西安攻略"})
+
+    assert response.status_code == 200
+    events = _parse_sse_body(response.text)
+    assert events[0]["event"] == "thinking"
+    assert observed_session_ids == [session["id"]]
+
+
+def test_stream_overlap_does_not_leak_session_context(client, monkeypatch):
+    import threading
+
+    session_a = create_session(client, title="会话A")
+    session_b = create_session(client, title="会话B")
+    service = client.app.state.services.inspiration
+    barrier = threading.Barrier(2)
+    observed: list[str] = []
+
+    monkeypatch.setattr(
+        service.style_service,
+        "chat",
+        lambda *, session_id, stage, user_reply, selected_items: (
+            barrier.wait(timeout=2),
+            observed.append(session_id),
+            {
+                "reply": f"风格建议-{session_id}",
+                "options": {"title": "请选择", "items": ["自然写实"], "max": 1},
+                "stage": stage,
+                "next_stage": stage,
+                "is_finished": False,
+                "fallback_used": False,
+            },
+        )[-1],
+    )
+
+    def make_stream(payload):
+        service.suggest_painting_style(
+            session_id=payload["session_id"],
+            stage="painting_style",
+            user_reply=payload.get("text") or "",
+            selected_items=payload.get("selected_items") or [],
+        )
+        yield {"event": "result", "data": {"reply": "完成", "stage": "style_ready", "locked": False}}
+
+    monkeypatch.setattr(service.creative_agent, "respond_stream", make_stream)
+
+    responses: list[str] = []
+
+    def run_stream(session_id: str) -> None:
+        generator = asyncio.run(
+            service.send_message_stream(
+                session_id=session_id,
+                text="继续",
+                selected_items=[],
+                action=None,
+                image_usages=[],
+                images=[],
+                videos=[],
+            )
+        )
+        responses.append("".join(list(generator)))
+
+    thread_a = threading.Thread(target=run_stream, args=(session_a["id"],))
+    thread_b = threading.Thread(target=run_stream, args=(session_b["id"],))
+    thread_a.start()
+    thread_b.start()
+    thread_a.join()
+    thread_b.join()
+
+    assert set(observed) == {session_a["id"], session_b["id"]}
+    assert len(responses) == 2
+
+
+def test_non_stream_endpoint_unchanged(client, monkeypatch):
+    session = create_session(client)
+    service = client.app.state.services.inspiration
+
+    monkeypatch.setattr(
+        service,
+        "_run_agent_turn",
+        lambda **_: {
+            "reply": "普通端点仍然返回完整 JSON。",
+            "stage": "style_ready",
+            "locked": False,
+            "progress": 20,
+            "progress_label": "风格确定",
+            "options": {"items": [{"label": "继续", "action_hint": "continue"}]},
+            "trace": [],
+        },
+    )
+
+    response = client.post("/api/v1/inspirations/messages", data={"session_id": session["id"], "text": "继续"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["draft"]["stage"] == "style_ready"
+    assert body["messages"][-1]["content"] == "普通端点仍然返回完整 JSON。"

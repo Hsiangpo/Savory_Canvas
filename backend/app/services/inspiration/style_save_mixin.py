@@ -9,10 +9,10 @@ from backend.app.services.inspiration.constants import STYLE_SAVE_SUMMARY_SYSTEM
 
 
 class InspirationStyleSaveMixin:
-    def _create_saved_style(self, session: dict[str, Any], state: dict[str, Any]) -> None:
+    def _create_saved_style(self, session: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         now = now_iso()
         style_name, style_payload = self._summarize_style_for_save(session_id=session["id"], state=state)
-        self.style_repo.create(
+        return self.style_repo.create(
             {
                 "id": new_id(),
                 "session_id": session["id"],

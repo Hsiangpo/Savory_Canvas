@@ -51,10 +51,6 @@ def _ensure_utf8_stdio() -> None:
             continue
 
 
-def _is_legacy_inspiration_mode() -> bool:
-    return any(arg == "--legacy" for arg in sys.argv)
-
-
 def _extract_cli_port(default_port: int) -> int:
     for index, arg in enumerate(sys.argv):
         if arg == "--port" and index + 1 < len(sys.argv):
@@ -84,7 +80,6 @@ def create_app() -> FastAPI:
     configure_logging()
     install_request_id_filter()
     settings = load_settings()
-    legacy_inspiration_mode = _is_legacy_inspiration_mode()
 
     database = Database(settings.db_path)
     migration_path = Path(__file__).resolve().parents[1] / "migrations" / "001_init.sql"
@@ -159,14 +154,12 @@ def create_app() -> FastAPI:
         model_service=model_service,
         storage=storage,
         generation_worker=generation_worker,
-        agent_mode="legacy" if legacy_inspiration_mode else "langgraph",
     )
-    if not legacy_inspiration_mode:
-        inspiration_service.creative_agent = CreativeAgent(
-            llm_provider=AgentLLMProvider(model_service=model_service),
-            tools=build_creative_tools(inspiration_service),
-            db_path=settings.db_path,
-        )
+    inspiration_service.creative_agent = CreativeAgent(
+        llm_provider=AgentLLMProvider(model_service=model_service),
+        tools=build_creative_tools(inspiration_service),
+        db_path=settings.db_path,
+    )
     generation_service = GenerationService(
         job_repo=job_repo,
         result_repo=result_repo,

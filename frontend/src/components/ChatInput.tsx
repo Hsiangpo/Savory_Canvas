@@ -124,9 +124,9 @@ export function ChatInput(
           <textarea
             ref={inputTextRef}
             className="input"
-            placeholder={draftLocked ? '方案已锁定，可直接在右侧生成。' : '输入描述，支持同时上传文本、图片、视频（Enter发送，Shift/Ctrl+Enter换行）。'}
+            placeholder={draftLocked ? '方案已锁定，可继续让 Agent 保存风格、开始生成或解释当前方案。' : '输入描述，支持同时上传文本、图片、视频（Enter发送，Shift/Ctrl+Enter换行）。'}
             value={inputText}
-            disabled={isLoading || draftLocked}
+            disabled={isLoading}
             onChange={(event) => onInputChange(event.target.value)}
             rows={1}
             style={{
@@ -149,7 +149,7 @@ export function ChatInput(
               }
             }}
           />
-          <button className="btn btn-primary" disabled={(!inputText.trim() && pendingFiles.length === 0) || isLoading || draftLocked} onClick={onSend}>
+          <button className="btn btn-primary" disabled={(!inputText.trim() && pendingFiles.length === 0) || isLoading} onClick={onSend}>
             发送
           </button>
         </div>

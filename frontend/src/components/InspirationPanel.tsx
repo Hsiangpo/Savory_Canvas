@@ -47,11 +47,6 @@ function isBottomActionOption(option: string): boolean {
   );
 }
 
-function isPromptActionOption(option: string): boolean {
-  const text = option.trim();
-  return text.includes('继续优化') || text.includes('确定使用') || text.includes('确认提示词');
-}
-
 function isSaveDecisionOption(option: string): boolean {
   const text = option.trim();
   return text.includes('保存风格') || text.includes('暂不保存');
@@ -220,63 +215,18 @@ export default function InspirationPanel() {
       .reduce((max, current) => Math.max(max, current), -1);
   }, [messages]);
 
-  const lastSaveDecisionMsgIndex = useMemo(() => {
-    return messages
-      .map((message, index) => (message.options?.items?.some((item) => item.includes('保存风格')) ? index : -1))
-      .reduce((max, current) => Math.max(max, current), -1);
-  }, [messages]);
-
-  const isWaitingForSaveDecision = useMemo(() => {
-    if (agentMeta?.mode === 'langgraph') {
-      const items = draft?.options?.items || [];
-      return items.some((item) => isSaveDecisionOption(item));
-    }
-    if (!draft?.locked || lastSaveDecisionMsgIndex < 0) return false;
-    const hasNewAssistantAfterOptions = messages
-      .slice(lastSaveDecisionMsgIndex + 1)
-      .some((message) => message.role === 'assistant');
-    return !hasNewAssistantAfterOptions;
-  }, [agentMeta?.mode, draft?.locked, draft?.options?.items, lastSaveDecisionMsgIndex, messages]);
-
-  const promptActionState = useMemo(() => {
-    if (agentMeta?.mode === 'langgraph') {
-      const items = draft?.options?.items || [];
-      return {
-        visible: items.some((item) => isPromptActionOption(item)),
-        allowConfirm: items.some((item) => item.includes('确定使用') || item.includes('确认提示词')),
-      };
-    }
-    if (draft?.stage !== 'prompt_revision' || draft.locked) {
-      return { visible: false, allowConfirm: false };
-    }
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message.role !== 'assistant' && message.role !== 'system') continue;
-      const items = message.options?.items || [];
-      const hasPromptActions = items.some((item) => isPromptActionOption(item));
-      if (!hasPromptActions) {
-        return { visible: false, allowConfirm: false };
-      }
-      return {
-        visible: true,
-        allowConfirm: items.some((item) => item.includes('确定使用') || item.includes('确认提示词')),
-      };
-    }
-    return { visible: false, allowConfirm: false };
-  }, [agentMeta?.mode, draft?.locked, draft?.options?.items, draft?.stage, messages]);
-
   const dynamicBottomOptionBlock = useMemo(() => {
-    if (agentMeta?.mode !== 'langgraph') return null;
     const optionBlock = draft?.options;
     if (!optionBlock?.items?.length) return null;
     const bottomItems = optionBlock.items.filter((item) => isBottomActionOption(item));
     if (!bottomItems.length) return null;
     return { ...optionBlock, items: bottomItems };
-  }, [agentMeta?.mode, draft?.options]);
+  }, [draft?.options]);
 
   const handleOptionClick = (event: React.MouseEvent, option: string, max: number, isLatestOption: boolean) => {
     event.stopPropagation();
-    if (isLoading || !isLatestOption || draft?.locked) return;
+    if (isLoading || !isLatestOption) return;
+    if (draft?.locked && !isSaveDecisionOption(option)) return;
 
     const actionValue = resolveActionValue(option);
 
@@ -356,7 +306,6 @@ export default function InspirationPanel() {
     displayOverride?: SendDisplayOverride,
   ) => {
     if (!activeSessionId || isLoading) return;
-    if (draft?.locked && actionStr !== 'save_style' && actionStr !== 'skip_save') return;
 
     const text = (overrideText ?? inputText).trim();
     const selection = customSelection || currentSelection;
@@ -460,6 +409,7 @@ export default function InspirationPanel() {
       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
         {items.map((option) => {
           const primary = option.includes('确认') || option.includes('保存') || option.includes('生成');
+          const disableAction = isLoading || (!!draft?.locked && !isSaveDecisionOption(option));
           const actionValue = option.includes('继续调整分图')
             ? () => handleReviseAssets()
             : () => handleSend(resolveActionValue(option), [option]);
@@ -467,7 +417,7 @@ export default function InspirationPanel() {
             <button
               key={`${location}-${option}`}
               className={primary ? 'btn btn-primary' : 'btn btn-secondary'}
-              disabled={isLoading || !!draft?.locked}
+              disabled={disableAction}
               onClick={actionValue}
             >
               {option}
@@ -493,28 +443,16 @@ export default function InspirationPanel() {
 
       {activeSessionId && draft?.stage && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px 20px', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-glass)', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-          {agentMeta?.mode === 'langgraph' ? (
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-              <div style={{ color: 'var(--accent-color)', fontWeight: 600 }}>
-                当前 Agent 阶段：{agentMeta.dynamic_stage_label || getStageLabel(draft.stage)}
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ color: 'var(--accent-color)', fontWeight: 600 }}>
+              当前 Agent 阶段：{agentMeta?.dynamic_stage_label || getStageLabel(draft.stage)}
+            </div>
+            {agentMeta?.dynamic_stage && (
+              <div style={{ color: 'var(--text-secondary)' }}>
+                ({agentMeta.dynamic_stage})
               </div>
-              {agentMeta.dynamic_stage && (
-                <div style={{ color: 'var(--text-secondary)' }}>
-                  ({agentMeta.dynamic_stage})
-                </div>
-              )}
-            </div>
-          ) : (
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <div style={{ color: draft.stage === 'style_collecting' ? 'var(--accent-color)' : 'var(--text-secondary)' }}>1. 风格确认</div>
-              <div>&gt;</div>
-              <div style={{ color: draft.stage === 'prompt_revision' ? 'var(--accent-color)' : ['asset_confirming', 'locked'].includes(draft.stage) ? 'var(--text-secondary)' : 'var(--text-muted)' }}>2. 张数与提示词确认</div>
-              <div>&gt;</div>
-              <div style={{ color: draft.stage === 'asset_confirming' ? 'var(--accent-color)' : draft.stage === 'locked' ? 'var(--text-secondary)' : 'var(--text-muted)' }}>3. 分图确认</div>
-              <div>&gt;</div>
-              <div style={{ color: draft.stage === 'locked' ? 'var(--accent-color)' : 'var(--text-muted)' }}>4. 锁定生成</div>
-            </div>
-          )}
+            )}
+          </div>
           {agentMeta?.trace?.length ? (
             <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'grid', gap: '6px' }}>
               <div style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Agent 工具链</div>
@@ -565,7 +503,7 @@ export default function InspirationPanel() {
 
             {isLoading && (
               <div className="chat-bubble bot">
-                <Loader2 size={16} className="animate-spin" /> {agentMeta?.mode === 'langgraph' ? 'Agent 正在思考...' : '正在思考中...'}
+                <Loader2 size={16} className="animate-spin" /> Agent 正在思考...
               </div>
             )}
           </div>
@@ -577,28 +515,19 @@ export default function InspirationPanel() {
               isLoading={isLoading}
               onRemoveCandidateItem={removeCandidateItem}
               actionArea={
-                agentMeta?.mode === 'langgraph' && dynamicBottomOptionBlock?.items.some((item) => isAllocationOption(item))
+                dynamicBottomOptionBlock?.items.some((item) => isAllocationOption(item))
                   ? renderDynamicActionButtons(
                       { ...dynamicBottomOptionBlock, items: dynamicBottomOptionBlock.items.filter((item) => isAllocationOption(item)) },
                       'allocation',
                     )
-                  : (
-                    <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-                      <button className="btn btn-primary" disabled={isLoading} onClick={() => handleSend('confirm_allocation_plan', ['确认分图并锁定'])}>
-                        <Wand2 size={16} /> 确认分图并锁定
-                      </button>
-                      <button className="btn btn-secondary" disabled={isLoading} onClick={handleReviseAssets}>
-                        继续调整分图
-                      </button>
-                    </div>
-                  )
+                  : null
               }
             />
           )}
 
           <div style={{ marginTop: '8px', borderTop: '1px solid var(--border-color)', padding: '14px 0' }}>
             <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
-              {agentMeta?.mode === 'langgraph' && dynamicBottomOptionBlock
+              {dynamicBottomOptionBlock
                 ? renderDynamicActionButtons(
                     {
                       ...dynamicBottomOptionBlock,
@@ -607,17 +536,6 @@ export default function InspirationPanel() {
                     'footer',
                   )
                 : null}
-              {agentMeta?.mode !== 'langgraph' && promptActionState.visible && promptActionState.allowConfirm && (
-                <button className="btn btn-primary" onClick={() => handleSend('confirm_prompt', ['确定使用'])} disabled={isLoading}>
-                  <Wand2 size={16} /> 确认提示词
-                </button>
-              )}
-              {agentMeta?.mode !== 'langgraph' && isWaitingForSaveDecision && (
-                <>
-                  <button className="btn btn-primary" onClick={() => handleSend('save_style', ['保存风格'])} disabled={isLoading}>保存风格</button>
-                  <button className="btn btn-secondary" onClick={() => handleSend('skip_save', ['暂不保存'])} disabled={isLoading}>暂不保存</button>
-                </>
-              )}
             </div>
 
             <ChatInput

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import logging
 from typing import Any
 
 from backend.app.core.errors import DomainError
@@ -9,85 +7,17 @@ from backend.app.core.utils import new_id, now_iso
 from backend.app.services.inspiration.allocation_builder_mixin import InspirationAllocationBuilderMixin
 from backend.app.services.inspiration.asset_extraction_mixin import InspirationAssetExtractionMixin
 from backend.app.services.inspiration.constants import (
-    IMAGE_COUNT_EXTRACT_SYSTEM_PROMPT,
-    PROMPT_ACTION_OPTIONS,
-    PROMPT_READINESS_SYSTEM_PROMPT,
     VISION_ERROR_MESSAGE,
     WELCOME_MESSAGE,
 )
-from backend.app.services.inspiration.requirement_mixin import InspirationRequirementMixin
 from backend.app.services.inspiration.style_save_mixin import InspirationStyleSaveMixin
-
-logger = logging.getLogger(__name__)
 
 
 class InspirationFlowMixin(
     InspirationAssetExtractionMixin,
     InspirationAllocationBuilderMixin,
-    InspirationRequirementMixin,
     InspirationStyleSaveMixin,
 ):
-    def _resolve_prompt_action_options(
-        self,
-        session: dict[str, Any],
-        state: dict[str, Any],
-        user_feedback: str,
-        prompt_text: str,
-    ) -> dict[str, Any] | None:
-        if not bool(state.get("requirement_ready")):
-            return None
-        if self._assess_prompt_readiness(session, state, user_feedback, prompt_text):
-            return dict(PROMPT_ACTION_OPTIONS)
-        return None
-
-    def _assess_prompt_readiness(
-        self,
-        session: dict[str, Any],
-        state: dict[str, Any],
-        user_feedback: str,
-        prompt_text: str,
-    ) -> bool:
-        style_payload = self._build_style_payload(state)
-        style_text = self._format_style_payload_text(style_payload)
-        user_prompt = (
-            f"图片数量：{state.get('image_count') or 0}。\n"
-            f"风格参数：{style_text}。\n"
-            f"本轮用户补充：{user_feedback or '无'}。\n"
-            f"当前母提示词：{prompt_text or '无'}。\n"
-            "请判断是否可进入资产确认。"
-        )
-        decision = self._call_text_model_with_retry(
-            session_id=session["id"],
-            system_prompt=PROMPT_READINESS_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            strict_json=False,
-        ).strip().upper()
-        if "READY" in decision and "REVISE" not in decision:
-            return True
-        if "REVISE" in decision:
-            return False
-        raise DomainError(code="E-1004", message="提示词确认判断失败，请稍后重试", status_code=503)
-
-    def _upsert_draft_style(self, session: dict[str, Any], state: dict[str, Any]) -> str:
-        payload = self._build_style_payload(state)
-        now = now_iso()
-        draft_style_id = state.get("draft_style_id")
-        if draft_style_id and self.style_repo.get(draft_style_id):
-            self.style_repo.update_payload(draft_style_id, payload, now)
-            return draft_style_id
-        created = self.style_repo.create(
-            {
-                "id": new_id(),
-                "session_id": session["id"],
-                "name": "灵感草稿",
-                "style_payload": payload,
-                "is_builtin": False,
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
-        return created["id"]
-
     def _collect_recent_user_context(self, session_id: str, limit: int) -> str:
         messages = self.inspiration_repo.list_messages(session_id)
         if not messages:
@@ -236,89 +166,6 @@ class InspirationFlowMixin(
             state["transcript_seen_ids"] = sorted(seen_ids)
             state["updated_at"] = now_iso()
             self.inspiration_repo.upsert_state(state)
-
-    def _merge_style_payload(self, state: dict[str, Any], style_stage: str, selected_items: list[str]) -> None:
-        if not selected_items:
-            return
-        payload = self._build_style_payload(state)
-        joined = "、".join(selected_items)
-        if style_stage == "painting_style":
-            payload["painting_style"] = joined
-        elif style_stage == "color_mood":
-            payload["color_mood"] = joined
-        elif style_stage == "background_decor":
-            payload["prompt_example"] = f"{payload.get('prompt_example', '')}；背景偏好：{joined}".strip("；")
-            payload["extra_keywords"] = self._merge_keyword_values(payload.get("extra_keywords"), selected_items)
-        elif style_stage == "image_count":
-            image_count = self._extract_image_count(selected_items, "")
-            if image_count is not None:
-                state["image_count"] = image_count
-        state["style_payload"] = payload
-
-    def _extract_image_count(
-        self,
-        selected_items: list[str],
-        user_text: str,
-        *,
-        session_id: str | None = None,
-    ) -> int | None:
-        if selected_items:
-            candidate = selected_items[0].strip().replace("张", "")
-            if candidate.isdigit():
-                image_count = int(candidate)
-                if 1 <= image_count <= 10:
-                    return image_count
-        normalized_text = user_text.strip()
-        if not normalized_text or not session_id:
-            return None
-        if not any(char.isdigit() for char in normalized_text) and not any(
-            char in "一二三四五六七八九十两" for char in normalized_text
-        ):
-            return None
-        model_text = self._call_text_model_with_retry(
-            session_id=session_id,
-            system_prompt=IMAGE_COUNT_EXTRACT_SYSTEM_PROMPT,
-            user_prompt=f"用户输入：{normalized_text}",
-            strict_json=True,
-        )
-        payload = self._parse_image_count_payload(model_text)
-        image_count = payload.get("image_count")
-        if isinstance(image_count, int) and 1 <= image_count <= 10:
-            return image_count
-        if isinstance(image_count, str):
-            candidate = image_count.strip().replace("张", "")
-            if candidate.isdigit():
-                normalized = int(candidate)
-                if 1 <= normalized <= 10:
-                    return normalized
-        return None
-
-    def _parse_image_count_payload(self, model_text: str) -> dict[str, Any]:
-        text = model_text.strip()
-        if text.startswith("```"):
-            lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
-            text = "\n".join(lines).strip()
-        start_index = text.find("{")
-        end_index = text.rfind("}")
-        if start_index == -1 or end_index == -1 or end_index < start_index:
-            raise DomainError(code="E-1004", message="模型输出格式异常，请重试", status_code=503)
-        json_text = text[start_index : end_index + 1]
-        try:
-            payload = json.loads(json_text)
-        except json.JSONDecodeError as error:
-            raise DomainError(code="E-1004", message="模型输出格式异常，请重试", status_code=503) from error
-        if not isinstance(payload, dict):
-            raise DomainError(code="E-1004", message="模型输出格式异常，请重试", status_code=503)
-        return payload
-
-    def _ensure_image_count_options(self, options: dict[str, Any] | None) -> dict[str, Any]:
-        if isinstance(options, dict):
-            title = options.get("title")
-            items = options.get("items")
-            max_value = options.get("max")
-            if isinstance(title, str) and isinstance(items, list) and items and isinstance(max_value, int) and max_value == 1:
-                return options
-        raise DomainError(code="E-1004", message="模型返回数量选项异常，请重试", status_code=503)
 
     def _normalize_selected_items(self, selected_items: list[str]) -> list[str]:
         normalized: list[str] = []

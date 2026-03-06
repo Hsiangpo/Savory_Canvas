@@ -1647,7 +1647,6 @@
           "mode": {
             "type": "string",
             "enum": [
-              "legacy",
               "langgraph"
             ]
           },

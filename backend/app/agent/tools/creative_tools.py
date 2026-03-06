@@ -27,9 +27,14 @@ def build_creative_tools(runtime: Any) -> dict[str, Any]:
         return runtime.allocate_assets_to_images(session_id=session_id, user_hint=user_hint)
 
     @tool
-    def generate_images(job_id: str) -> dict[str, Any]:
-        """按当前任务配置执行图片生成。"""
-        return runtime.generate_images(job_id=job_id)
+    def save_style(session_id: str) -> dict[str, Any]:
+        """将当前锁定草案保存为可复用的风格模板。"""
+        return runtime.save_style_from_agent(session_id=session_id)
+
+    @tool
+    def generate_images(session_id: str) -> dict[str, Any]:
+        """按当前会话锁定草案创建图片生成任务。"""
+        return runtime.generate_images(session_id=session_id)
 
     @tool
     def generate_copy(job_id: str) -> dict[str, Any]:
@@ -41,6 +46,7 @@ def build_creative_tools(runtime: Any) -> dict[str, Any]:
         "extract_assets": extract_assets,
         "generate_style_prompt": generate_style_prompt,
         "allocate_assets_to_images": allocate_assets_to_images,
+        "save_style": save_style,
         "generate_images": generate_images,
         "generate_copy": generate_copy,
     }

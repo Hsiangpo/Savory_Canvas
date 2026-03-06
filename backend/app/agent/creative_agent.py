@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -26,25 +26,6 @@ class CreativeAgentState(TypedDict, total=False):
     agent_messages: list[BaseMessage]
     trace: list[dict[str, Any]]
     tool_call_count: int
-
-
-@dataclass
-class CreativeAgentTurn:
-    reply: str
-    stage: Literal["style_collecting", "prompt_revision", "asset_confirming", "locked"]
-    options: dict[str, Any] | None = None
-    style_payload: dict[str, Any] | None = None
-    style_prompt: str | None = None
-    image_count: int | None = None
-    asset_candidates: dict[str, Any] | None = None
-    allocation_plan: list[dict[str, Any]] = field(default_factory=list)
-    locked: bool = False
-    draft_style_id: str | None = None
-    requirement_ready: bool | None = None
-    prompt_confirmable: bool | None = None
-    dynamic_stage: str | None = None
-    dynamic_stage_label: str | None = None
-    trace: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -199,6 +180,7 @@ class CreativeAgent:
             f"asset_candidates={json.dumps(asset_candidates, ensure_ascii=False)}\n"
             f"allocation_plan={json.dumps(allocation_plan, ensure_ascii=False)}\n"
             f"image_count={state.get('image_count')}\n"
+            f"draft_style_id={state.get('draft_style_id') or ''}\n"
             f"last_tool_name={last_tool_name}\n"
             f"last_tool_result={json.dumps(last_tool_result, ensure_ascii=False)}\n"
             f"attachments={json.dumps(attachments, ensure_ascii=False)}\n"
@@ -285,6 +267,20 @@ class CreativeAgent:
                 "dynamic_stage_label": dynamic_stage_label,
                 "trace": trace,
             }
+        if tool_name == "save_style":
+            tool_payload = tool_result if isinstance(tool_result, dict) else {}
+            style_name = str(tool_payload.get("style_name") or "").strip()
+            style_name_suffix = f"「{style_name}」" if style_name else ""
+            return {
+                "reply": f"已保存当前风格{style_name_suffix}，后续可在风格管理中复用。",
+                "stage": "locked",
+                "locked": True,
+                "draft_style_id": tool_payload.get("style_id"),
+                "status": tool_payload.get("status"),
+                "dynamic_stage": dynamic_stage,
+                "dynamic_stage_label": dynamic_stage_label,
+                "trace": trace,
+            }
         if tool_name == "generate_images":
             tool_payload = tool_result if isinstance(tool_result, dict) else {}
             return {
@@ -293,6 +289,7 @@ class CreativeAgent:
                 "locked": True,
                 "job_id": tool_payload.get("job_id"),
                 "status": tool_payload.get("status"),
+                "options": {"title": "请选择下一步", "items": ["保存风格", "暂不保存"], "max": 1},
                 "dynamic_stage": dynamic_stage,
                 "dynamic_stage_label": dynamic_stage_label,
                 "trace": trace,

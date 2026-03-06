@@ -12,21 +12,16 @@ def test_inspiration_upload_images_respects_image_usages(client, monkeypatch):
     setup_model_routing(client, text_model_name="gpt-4.1")
     session = create_session(client, title="图片用途映射")
     service = client.app.state.services.inspiration
-    service.agent_mode = "legacy"
-
-    from backend.app.services.style_service import StyleService
-
-    def fake_chat(_self, **_kwargs):
-        return {
+    monkeypatch.setattr(
+        service,
+        "_run_agent_turn",
+        lambda **_: {
             "reply": "已收到图片素材。",
-            "options": None,
-            "stage": "painting_style",
-            "next_stage": "painting_style",
-            "is_finished": False,
-            "fallback_used": False,
-        }
-
-    monkeypatch.setattr(StyleService, "chat", fake_chat)
+            "stage": "style_collecting",
+            "locked": False,
+            "trace": [],
+        },
+    )
 
     response = client.post(
         "/api/v1/inspirations/messages",

@@ -128,7 +128,7 @@ class InspirationAgentTraceStep(BaseModel):
 
 
 class InspirationAgentMeta(BaseModel):
-    mode: Literal["legacy", "langgraph"]
+    mode: Literal["langgraph"]
     dynamic_stage: str | None = None
     dynamic_stage_label: str | None = None
     trace: list[InspirationAgentTraceStep] = Field(default_factory=list)

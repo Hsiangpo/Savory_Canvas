@@ -123,7 +123,7 @@ export interface InspirationAgentTraceStep {
 }
 
 export interface InspirationAgentMeta {
-  mode: 'legacy' | 'langgraph';
+  mode: 'langgraph';
   dynamic_stage?: string | null;
   dynamic_stage_label?: string | null;
   trace: InspirationAgentTraceStep[];

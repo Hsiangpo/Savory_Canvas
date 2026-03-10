@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from conftest import create_session, create_style, setup_model_routing
 
@@ -13,6 +14,7 @@ from conftest import create_session, create_style, setup_model_routing
 @dataclass
 class _FakeChatResponse:
     content: str
+    reasoning_summaries: list[str] = field(default_factory=list)
 
 
 class _FakeChatModel:
@@ -23,7 +25,12 @@ class _FakeChatModel:
     def invoke(self, messages: list[Any]) -> _FakeChatResponse:
         self.calls.append(messages)
         index = len(self.calls) - 1
-        return _FakeChatResponse(content=json.dumps(self._decisions[index], ensure_ascii=False))
+        payload = dict(self._decisions[index])
+        reasoning_summaries = payload.pop("__reasoning_summaries", [])
+        return _FakeChatResponse(
+            content=json.dumps(payload, ensure_ascii=False),
+            reasoning_summaries=list(reasoning_summaries) if isinstance(reasoning_summaries, list) else [],
+        )
 
 
 class _FakeLLMProvider:
@@ -190,6 +197,107 @@ def test_creative_agent_tool_node_force_overrides_suggest_style_session_id():
     assert result["tool_call_count"] == 1
 
 
+def test_creative_agent_tool_node_fills_missing_suggest_style_args_from_request():
+    from backend.app.agent.creative_agent import CreativeAgent
+    import threading
+
+    observed: dict[str, Any] = {}
+    agent = CreativeAgent.__new__(CreativeAgent)
+    agent._stream_local = threading.local()
+    agent.tools = {
+        "suggest_painting_style": _ToolStub(lambda args: observed.update(args) or {"reply": "ok"}),
+    }
+
+    agent._tool_node(
+        {
+            "decision": {
+                "tool_name": "suggest_painting_style",
+                "tool_args": {
+                    "session_id": "wrong-session",
+                },
+            },
+            "request": {
+                "session_id": "correct-session",
+                "text": "我想做西安攻略",
+                "selected_items": ["自然写实"],
+                "state": {"stage": "initial_understanding", "style_stage": "painting_style", "locked": False},
+            },
+            "trace": [],
+        }
+    )
+
+    assert observed["session_id"] == "correct-session"
+    assert observed["user_reply"] == "我想做西安攻略"
+    assert observed["selected_items"] == ["自然写实"]
+    assert observed["stage"] == "painting_style"
+
+
+def test_creative_agent_tool_node_uses_current_style_stage_when_stage_missing():
+    from backend.app.agent.creative_agent import CreativeAgent
+    import threading
+
+    observed: dict[str, Any] = {}
+    agent = CreativeAgent.__new__(CreativeAgent)
+    agent._stream_local = threading.local()
+    agent.tools = {
+        "suggest_painting_style": _ToolStub(lambda args: observed.update(args) or {"reply": "ok"}),
+    }
+
+    agent._tool_node(
+        {
+            "decision": {
+                "tool_name": "suggest_painting_style",
+                "tool_args": {
+                    "session_id": "wrong-session",
+                },
+            },
+            "request": {
+                "session_id": "correct-session",
+                "text": "继续",
+                "selected_items": [],
+                "state": {"stage": "style_ready", "style_stage": "color_mood", "locked": False},
+            },
+            "trace": [],
+        }
+    )
+
+    assert observed["stage"] == "color_mood"
+
+
+def test_creative_agent_tool_node_fills_missing_extract_assets_args_from_request():
+    from backend.app.agent.creative_agent import CreativeAgent
+    import threading
+
+    observed: dict[str, Any] = {}
+    agent = CreativeAgent.__new__(CreativeAgent)
+    agent._stream_local = threading.local()
+    agent.tools = {
+        "extract_assets": _ToolStub(lambda args: observed.update(args) or {"locations": ["西安"], "keywords": ["探店"]}),
+    }
+
+    agent._tool_node(
+        {
+            "decision": {
+                "tool_name": "extract_assets",
+                "tool_args": {
+                    "session_id": "wrong-session",
+                },
+            },
+            "request": {
+                "session_id": "correct-session",
+                "text": "帮我整理一个西安探店图文思路",
+                "selected_items": [],
+                "state": {"stage": "initial_understanding", "style_prompt": "", "locked": False},
+            },
+            "trace": [],
+        }
+    )
+
+    assert observed["session_id"] == "correct-session"
+    assert observed["user_hint"] == "帮我整理一个西安探店图文思路"
+    assert observed["style_prompt"] == ""
+
+
 def test_creative_agent_capture_tool_output_returns_structured_data_only():
     from backend.app.agent.creative_agent import CreativeAgent
 
@@ -210,6 +318,27 @@ def test_creative_agent_capture_tool_output_returns_structured_data_only():
     assert image_capture == {"active_job_id": "job-123", "job_status": "queued"}
     assert "reply" not in image_capture
     assert "options" not in image_capture
+
+
+def test_creative_agent_capture_tool_output_updates_style_stage_from_suggest_result():
+    from backend.app.agent.creative_agent import CreativeAgent
+
+    agent = CreativeAgent.__new__(CreativeAgent)
+
+    capture = agent._capture_tool_output(
+        tool_name="suggest_painting_style",
+        tool_result={
+            "reply": "接下来看看背景装饰。",
+            "stage": "background_decor",
+            "next_stage": "color_mood",
+            "options": {"title": "请选择", "items": ["手账贴纸"], "max": 1},
+            "is_finished": False,
+            "fallback_used": False,
+        },
+        request={"state": {"style_stage": "painting_style"}},
+    )
+
+    assert capture["style_stage"] == "background_decor"
 
 
 def test_creative_agent_multi_tool_roundtrip_accumulates_tool_history(tmp_path):
@@ -280,15 +409,243 @@ def test_creative_agent_multi_tool_roundtrip_accumulates_tool_history(tmp_path):
         }
     )
 
-    assert len(llm_provider.model.calls) == 3
+    assert len(llm_provider.model.calls) == 2
     second_turn_summary = llm_provider.model.calls[1][-1].content
-    third_turn_summary = llm_provider.model.calls[2][-1].content
     assert "tool_history=" in second_turn_summary
     assert "extract_assets" in second_turn_summary
-    assert "generate_images" in third_turn_summary
-    assert result["reply"].startswith("我已经把素材整理好")
-    assert result["options"]["items"][0]["action_hint"] == "revise"
-    assert result["progress"] == 100
+    assert result["active_job_id"] == "job-123"
+    assert result["reply"].startswith("生成任务已经启动了")
+    assert result.get("options") in (None, {"items": []})
+    assert result["progress"] == 85
+
+
+def test_generate_style_prompt_without_image_count_marks_count_confirmation_required():
+    from backend.app.agent.creative_agent import CreativeAgent
+
+    agent = CreativeAgent.__new__(CreativeAgent)
+    capture = agent._capture_tool_output(
+        tool_name="generate_style_prompt",
+        tool_result={"style_prompt": "生成一张：西安探店图文思路。", "image_count": None},
+        request={"state": {"progress": 30}},
+    )
+
+    assert capture["stage"] == "count_confirmation_required"
+    assert capture["progress_label"] == "确认张数"
+    assert capture["prompt_confirmable"] is False
+
+
+def test_creative_agent_blocks_allocate_without_image_count(tmp_path):
+    from backend.app.agent.creative_agent import CreativeAgent
+
+    decisions = [
+        {
+            "decision": "use_tool",
+            "reason": "先生成提示词。",
+            "tool_name": "generate_style_prompt",
+            "tool_args": {"session_id": "session-1", "feedback": "继续"},
+        },
+        {
+            "decision": "use_tool",
+            "reason": "接着直接分图。",
+            "tool_name": "allocate_assets_to_images",
+            "tool_args": {"session_id": "session-1", "user_hint": "继续"},
+        },
+    ]
+    allocate_called = {"value": False}
+    agent = CreativeAgent(
+        llm_provider=_FakeLLMProvider(decisions),
+        tools={
+            "generate_style_prompt": _ToolStub(lambda _: {"style_prompt": "生成一张：西安探店图文思路。", "image_count": None}),
+            "allocate_assets_to_images": _ToolStub(lambda _: allocate_called.update(value=True) or []),
+        },
+        db_path=tmp_path / "agent.db",
+    )
+
+    result = agent.respond(
+        {
+            "session_id": "session-1",
+            "text": "继续整理",
+            "selected_items": [],
+            "attachments": [],
+            "action": None,
+            "state": {
+                "stage": "initial_understanding",
+                "locked": False,
+                "style_payload": {},
+                "style_prompt": "",
+                "asset_candidates": {},
+                "allocation_plan": [],
+            },
+        }
+    )
+
+    assert allocate_called["value"] is False
+    assert result["stage"] == "count_confirmation_required"
+    assert result["progress_label"] == "确认张数"
+    assert "先确认这次要生成几张图" in result["reply"]
+
+
+
+
+def test_creative_agent_redirects_redundant_extract_assets_after_count_confirmation(tmp_path):
+    from backend.app.agent.creative_agent import CreativeAgent
+
+    decisions = [
+        {
+            "decision": "use_tool",
+            "reason": "先提取素材。",
+            "tool_name": "extract_assets",
+            "tool_args": {"session_id": "session-1"},
+        },
+        {
+            "decision": "respond_directly",
+            "reason": "提示词已整理。",
+            "result": {
+                "reply": "我已经整理好了提示词。",
+                "stage": "prompt_ready",
+                "locked": False,
+            },
+        },
+    ]
+    observed = {"extract": 0, "prompt": 0}
+    agent = CreativeAgent(
+        llm_provider=_FakeLLMProvider(decisions),
+        tools={
+            "extract_assets": _ToolStub(lambda _: observed.__setitem__("extract", observed["extract"] + 1) or {}),
+            "generate_style_prompt": _ToolStub(lambda _: observed.__setitem__("prompt", observed["prompt"] + 1) or {"style_prompt": "生成一张大理洱海图解海报。", "image_count": 2}),
+        },
+        db_path=tmp_path / "agent-redirect-extract.db",
+    )
+
+    events = list(
+        agent.respond_stream(
+            {
+                "session_id": "session-1",
+                "text": "",
+                "selected_items": ["生成2张图，内容更丰富"],
+                "action": "set_image_count_2",
+                "attachments": [],
+                "state": {
+                    "stage": "count_confirmation_required",
+                    "locked": False,
+                    "image_count": 2,
+                    "asset_candidates": {"locations": ["大理"], "scenes": ["洱海", "漫步"], "foods": [], "keywords": ["大理洱海漫步"]},
+                    "style_prompt": "",
+                    "allocation_plan": [],
+                },
+            }
+        )
+    )
+
+    assert observed["extract"] == 0
+    assert observed["prompt"] == 1
+    assert any(event["event"] == "tool_start" and event["data"]["tool_name"] == "generate_style_prompt" for event in events)
+
+
+def test_creative_agent_allows_allocate_when_image_count_confirmed(tmp_path):
+    from backend.app.agent.creative_agent import CreativeAgent
+
+    decisions = [
+        {
+            "decision": "use_tool",
+            "reason": "现在可以分图了。",
+            "tool_name": "allocate_assets_to_images",
+            "tool_args": {"session_id": "session-1", "user_hint": "继续"},
+        },
+        {
+            "decision": "respond_directly",
+            "reason": "分图已经完成。",
+            "result": {
+                "reply": "分图方案已经整理好了。",
+                "stage": "allocation_ready",
+                "locked": False,
+                "progress": 72,
+                "progress_label": "分图预览",
+            },
+        },
+    ]
+    allocate_called = {"value": False}
+    agent = CreativeAgent(
+        llm_provider=_FakeLLMProvider(decisions),
+        tools={
+            "allocate_assets_to_images": _ToolStub(lambda _: allocate_called.update(value=True) or [{"slot_index": 1, "focus_title": "城墙主图"}]),
+        },
+        db_path=tmp_path / "agent.db",
+    )
+
+    result = agent.respond(
+        {
+            "session_id": "session-1",
+            "text": "继续整理",
+            "selected_items": [],
+            "attachments": [],
+            "action": None,
+            "state": {
+                "stage": "prompt_ready",
+                "locked": False,
+                "style_payload": {},
+                "style_prompt": "生成一张：西安探店图文思路。",
+                "asset_candidates": {"locations": ["西安"]},
+                "allocation_plan": [],
+                "image_count": 3,
+            },
+        }
+    )
+
+    assert allocate_called["value"] is True
+    assert result["stage"] == "allocation_ready"
+
+
+def test_creative_agent_stream_does_not_start_allocate_without_image_count(tmp_path):
+    from backend.app.agent.creative_agent import CreativeAgent
+
+    decisions = [
+        {
+            "decision": "use_tool",
+            "reason": "先生成提示词。",
+            "tool_name": "generate_style_prompt",
+            "tool_args": {"session_id": "session-1", "feedback": "继续"},
+        },
+        {
+            "decision": "use_tool",
+            "reason": "接着分图。",
+            "tool_name": "allocate_assets_to_images",
+            "tool_args": {"session_id": "session-1", "user_hint": "继续"},
+        },
+    ]
+    allocate_called = {"value": False}
+    agent = CreativeAgent(
+        llm_provider=_FakeLLMProvider(decisions),
+        tools={
+            "generate_style_prompt": _ToolStub(lambda _: {"style_prompt": "生成一张：西安探店图文思路。", "image_count": None}),
+            "allocate_assets_to_images": _ToolStub(lambda _: allocate_called.update(value=True) or []),
+        },
+        db_path=tmp_path / "agent.db",
+    )
+
+    events = list(
+        agent.respond_stream(
+            {
+                "session_id": "session-1",
+                "text": "继续整理",
+                "selected_items": [],
+                "attachments": [],
+                "action": None,
+                "state": {
+                    "stage": "initial_understanding",
+                    "locked": False,
+                    "style_payload": {},
+                    "style_prompt": "",
+                    "asset_candidates": {},
+                    "allocation_plan": [],
+                },
+            }
+        )
+    )
+
+    event_names = [event["event"] for event in events]
+    assert event_names == ["thinking", "thinking", "tool_start", "tool_done", "thinking", "thinking", "result"]
+    assert allocate_called["value"] is False
 
 
 def test_creative_agent_respond_stream_emits_thinking_before_tool(tmp_path):
@@ -331,9 +688,54 @@ def test_creative_agent_respond_stream_emits_thinking_before_tool(tmp_path):
         )
     )
 
-    assert [event["event"] for event in events] == ["thinking", "tool_start", "tool_done", "thinking", "result"]
-    assert events[1]["data"]["tool_name"] == "extract_assets"
-    assert events[2]["data"]["duration_ms"] >= 0
+    assert [event["event"] for event in events] == ["thinking", "thinking", "tool_start", "tool_done", "thinking", "thinking", "result"]
+    assert events[1]["data"]["message"] == "先提取素材。"
+    assert events[2]["data"]["tool_name"] == "extract_assets"
+    assert events[3]["data"]["duration_ms"] >= 0
+    assert events[5]["data"]["message"] == "素材提取完成，向用户汇报。"
+
+
+def test_creative_agent_respond_stream_emits_reasoning_summary_text(tmp_path):
+    from backend.app.agent.creative_agent import CreativeAgent
+
+    decisions = [
+        {
+            "__reasoning_summaries": ["**先确认素材范围，再调用提取工具。**"],
+            "decision": "use_tool",
+            "reason": "先提取素材。",
+            "tool_name": "extract_assets",
+            "tool_args": {"session_id": "session-1", "user_hint": "西安攻略", "style_prompt": ""},
+        },
+        {
+            "decision": "respond_directly",
+            "reason": "素材提取完成，向用户汇报。",
+            "result": {
+                "reply": "我先把素材整理出来了。",
+                "stage": "asset_ready",
+                "locked": False,
+            },
+        },
+    ]
+    agent = CreativeAgent(
+        llm_provider=_FakeLLMProvider(decisions),
+        tools={"extract_assets": _ToolStub(lambda _: {"foods": ["羊肉泡馍"]})},
+        db_path=tmp_path / "agent-reasoning.db",
+    )
+
+    events = list(
+        agent.respond_stream(
+            {
+                "session_id": "session-1",
+                "text": "我要做西安攻略",
+                "selected_items": [],
+                "attachments": [],
+                "state": {"stage": "initial_understanding", "locked": False},
+            }
+        )
+    )
+
+    assert [event["event"] for event in events] == ["thinking", "thinking", "tool_start", "tool_done", "thinking", "thinking", "result"]
+    assert events[1]["data"]["message"] == "**先确认素材范围，再调用提取工具。**"
 
 
 def test_creative_agent_system_prompt_loaded_from_external_file():
@@ -342,11 +744,135 @@ def test_creative_agent_system_prompt_loaded_from_external_file():
     agent = CreativeAgent.__new__(CreativeAgent)
     prompt = agent._build_system_prompt()
 
-    assert "友好热情的创作助手" in prompt
-    assert "reset_progress" in prompt
-    assert "action_hint" in prompt
-    assert "progress" in prompt
-    assert "emoji" in prompt or "🙂" in prompt or "🎨" in prompt
+    assert "创作主脑 Agent" in prompt
+    assert "style_profile_content_confirmation_needed" in prompt
+    assert "不要机械复用固定句式" in prompt
+    assert "不要连续多轮返回几乎一样的 reply 和 options" in prompt
+    assert "如果 `style_profile_content_confirmation_needed=True`" in prompt
+    assert "Few-shot 示例" in prompt
+    assert "generate_images" in prompt
+
+
+def test_agent_llm_provider_uses_responses_protocol(monkeypatch):
+    from backend.app.agent.llm_provider import AgentLLMProvider, _AgentProtocolCaller
+
+    captured: dict[str, Any] = {}
+
+    class FakeProviderRepo:
+        def get(self, provider_id: str) -> dict[str, Any] | None:
+            if provider_id != "provider-1":
+                return None
+            return {
+                "id": "provider-1",
+                "enabled": True,
+                "api_key": "secret",
+                "base_url": "https://example.com/v1",
+                "api_protocol": "responses",
+            }
+
+    class FakeModelService:
+        provider_repo = FakeProviderRepo()
+
+        def require_routing(self) -> dict[str, Any]:
+            return {"text_model": {"provider_id": "provider-1", "model_name": "gpt-5.4"}}
+
+    def fake_post_json(self, url: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+        captured["url"] = url
+        captured["payload"] = payload
+        return {
+            "output_text": "ok",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "**Providing friendly greeting**"}],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(_AgentProtocolCaller, "_post_json", fake_post_json)
+
+    model = AgentLLMProvider(model_service=FakeModelService()).build_chat_model()
+    response = model.invoke([SystemMessage(content="你是助手"), HumanMessage(content="你好")])
+
+    assert captured["url"].endswith("/responses")
+    assert captured["payload"]["reasoning"]["summary"] == "auto"
+    assert response.content == "ok"
+    assert response.reasoning_summaries == ["**Providing friendly greeting**"]
+
+
+def test_agent_llm_provider_uses_chat_completions_protocol(monkeypatch):
+    from backend.app.agent.llm_provider import AgentLLMProvider, _AgentProtocolCaller
+
+    captured: dict[str, Any] = {}
+
+    class FakeProviderRepo:
+        def get(self, provider_id: str) -> dict[str, Any] | None:
+            if provider_id != "provider-1":
+                return None
+            return {
+                "id": "provider-1",
+                "enabled": True,
+                "api_key": "secret",
+                "base_url": "https://example.com/v1",
+                "api_protocol": "chat_completions",
+            }
+
+    class FakeModelService:
+        provider_repo = FakeProviderRepo()
+
+        def require_routing(self) -> dict[str, Any]:
+            return {"text_model": {"provider_id": "provider-1", "model_name": "gpt-5.4"}}
+
+    def fake_post_json(self, url: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+        captured["url"] = url
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(_AgentProtocolCaller, "_post_json", fake_post_json)
+
+    model = AgentLLMProvider(model_service=FakeModelService()).build_chat_model()
+    response = model.invoke([SystemMessage(content="你是助手"), HumanMessage(content="你好")])
+
+    assert captured["url"].endswith("/chat/completions")
+    assert response.content == "ok"
+
+
+def test_agent_llm_provider_retries_retryable_upstream_error(monkeypatch):
+    from backend.app.agent.llm_provider import AgentLLMProvider, _AgentProtocolCaller
+    from backend.app.services.style.errors import StyleFallbackError
+
+    attempts = {"count": 0}
+
+    class FakeProviderRepo:
+        def get(self, provider_id: str) -> dict[str, Any] | None:
+            if provider_id != "provider-1":
+                return None
+            return {
+                "id": "provider-1",
+                "enabled": True,
+                "api_key": "secret",
+                "base_url": "https://example.com/v1",
+                "api_protocol": "responses",
+            }
+
+    class FakeModelService:
+        provider_repo = FakeProviderRepo()
+
+        def require_routing(self) -> dict[str, Any]:
+            return {"text_model": {"provider_id": "provider-1", "model_name": "gpt-5.4"}}
+
+    def flaky_post_json(self, url: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise StyleFallbackError("upstream_timeout_or_network", "temporary timeout")
+        return {"output_text": "ok"}
+
+    monkeypatch.setattr(_AgentProtocolCaller, "_post_json", flaky_post_json)
+
+    model = AgentLLMProvider(model_service=FakeModelService()).build_chat_model()
+    response = model.invoke([SystemMessage(content="你是助手"), HumanMessage(content="你好")])
+
+    assert attempts["count"] == 2
+    assert response.content == "ok"
 
 
 def test_apply_agent_turn_supports_dynamic_options_progress_and_active_job(client):
@@ -383,499 +909,70 @@ def test_apply_agent_turn_supports_dynamic_options_progress_and_active_job(clien
     assert conversation["draft"]["options"]["items"][0]["label"] == "我想回到分图再调一下"
 
 
-def test_build_creative_tools_supports_reset_progress_save_style_and_session_generation():
-    from backend.app.agent.tools import build_creative_tools
-
-    calls: list[tuple[str, str, str | None]] = []
-
-    class RuntimeStub:
-        def save_style_from_agent(self, session_id: str) -> dict[str, Any]:
-            calls.append(("save_style_from_agent", session_id, None))
-            return {"style_id": "style-1", "status": "saved"}
-
-        def generate_images(self, *, session_id: str) -> dict[str, Any]:
-            calls.append(("generate_images", session_id, None))
-            return {"job_id": "job-1", "status": "queued"}
-
-        def reset_progress(self, *, session_id: str, reset_to: str) -> dict[str, Any]:
-            calls.append(("reset_progress", session_id, reset_to))
-            return {"stage": "prompt_reopened"}
-
-    tools = build_creative_tools(RuntimeStub())
-    save_result = tools["save_style"].invoke({"session_id": "session-1"})
-    image_result = tools["generate_images"].invoke({"session_id": "session-1"})
-    reset_result = tools["reset_progress"].invoke({"session_id": "session-1", "reset_to": "prompt"})
-
-    assert save_result["style_id"] == "style-1"
-    assert image_result["job_id"] == "job-1"
-    assert reset_result["stage"] == "prompt_reopened"
-    assert calls == [
-        ("save_style_from_agent", "session-1", None),
-        ("generate_images", "session-1", None),
-        ("reset_progress", "session-1", "prompt"),
-    ]
-
-
-def test_inspiration_service_save_style_from_agent_creates_style(client, monkeypatch):
-    session = create_session(client)
-    service = client.app.state.services.inspiration
-    state = service._ensure_state(session["id"])
-    state["stage"] = "locked_ready"
-    state["locked"] = True
-    state["style_prompt"] = "生成一张：西安城墙与泡馍攻略图。"
-    state["style_payload"] = {
-        "painting_style": "复古手账",
-        "color_mood": "暖黄",
-        "prompt_example": "统一复古手账质感。",
-        "style_prompt": "生成一张：西安城墙与泡馍攻略图。",
-        "extra_keywords": ["贴纸标注"],
-    }
-    service.inspiration_repo.upsert_state(state)
-
-    monkeypatch.setattr(
-        service,
-        "_summarize_style_for_save",
-        lambda **_: (
-            "西安复古手账",
-            {
-                "painting_style": "复古手账",
-                "color_mood": "暖黄",
-                "prompt_example": "统一复古手账质感。",
-                "style_prompt": "生成一张：西安城墙与泡馍攻略图。",
-                "extra_keywords": ["贴纸标注"],
-                "sample_image_asset_ids": [],
-            },
-        ),
-    )
-
-    result = service.save_style_from_agent(session["id"])
-
-    assert result["status"] == "saved"
-    assert result["style_name"] == "西安复古手账"
-    saved_style = service.style_repo.get(result["style_id"])
-    assert saved_style is not None
-    assert saved_style["name"] == "西安复古手账"
-
-
-def test_inspiration_service_generate_images_can_auto_start_when_ready_without_locked(client, monkeypatch):
-    session = create_session(client, content_mode="food_scenic")
-    style = create_style(client, session["id"], {"painting_style": "自然写实"})
-    service = client.app.state.services.inspiration
-    state = service._ensure_state(session["id"])
-    state["stage"] = "allocation_ready"
-    state["locked"] = False
-    state["draft_style_id"] = style["id"]
-    state["image_count"] = 2
-    state["allocation_plan"] = [{"slot_index": 1, "focus_title": "城墙主图", "focus_description": "突出城墙。"}]
-    service.inspiration_repo.upsert_state(state)
-
-    scheduled_job_ids: list[str] = []
-    monkeypatch.setattr(service.generation_worker, "schedule", lambda job_id: scheduled_job_ids.append(job_id))
-
-    result = service.generate_images(session_id=session["id"])
-
-    assert result["status"] == "queued"
-    assert scheduled_job_ids == [result["job_id"]]
-    job = service.generation_worker.job_repo.get(result["job_id"])
-    assert job is not None
-    assert job["session_id"] == session["id"]
-    assert job["style_profile_id"] == style["id"]
-    assert job["image_count"] == 2
-
-
-def test_generate_images_prevents_duplicate_job(client, monkeypatch):
-    session = create_session(client, content_mode="food_scenic")
-    style = create_style(client, session["id"], {"painting_style": "自然写实"})
-    service = client.app.state.services.inspiration
-    state = service._ensure_state(session["id"])
-    state["stage"] = "allocation_ready"
-    state["image_count"] = 2
-    state["allocation_plan"] = [{"slot_index": 1, "focus_title": "城墙主图", "focus_description": "突出城墙。"}]
-    state["draft_style_id"] = style["id"]
-    service.inspiration_repo.upsert_state(state)
-
-    scheduled_job_ids: list[str] = []
-    monkeypatch.setattr(service.generation_worker, "schedule", lambda job_id: scheduled_job_ids.append(job_id))
-
-    first_result = service.generate_images(session_id=session["id"])
-    second_result = service.generate_images(session_id=session["id"])
-
-    assert first_result["job_id"] == second_result["job_id"]
-    assert second_result["already_running"] is True
-    assert len(scheduled_job_ids) == 1
-
-
-def test_inspiration_service_reset_progress_clears_state_by_scope(client):
-    session = create_session(client)
-    style = create_style(client, session["id"], {"painting_style": "复古手账"})
-    service = client.app.state.services.inspiration
-    state = service._ensure_state(session["id"])
-    state.update(
-        {
-            "stage": "allocation_ready",
-            "locked": True,
-            "style_payload": {"painting_style": "复古手账", "color_mood": "暖黄", "prompt_example": "统一风格", "style_prompt": "图解西安", "extra_keywords": []},
-            "style_prompt": "图解西安",
-            "asset_candidates": {"foods": ["羊肉泡馍"]},
-            "allocation_plan": [{"slot_index": 1, "focus_title": "城墙主图"}],
-            "draft_style_id": style["id"],
-            "progress": 78,
-            "progress_label": "分图规划",
-            "active_job_id": "job-123",
-        }
-    )
-    service.inspiration_repo.upsert_state(state)
-
-    result = service.reset_progress(session_id=session["id"], reset_to="allocation")
-
-    assert result["stage"] == "prompt_confirmed"
-    updated = service._ensure_state(session["id"])
-    assert updated["allocation_plan"] == []
-    assert updated["locked"] is False
-    assert updated["active_job_id"] is None
-    assert updated["style_prompt"] == "图解西安"
-    assert updated["style_payload"]["painting_style"] == "复古手账"
-
-
-def test_inspiration_send_message_propagates_agent_error_without_fallback(client, monkeypatch):
-    session = create_session(client)
-    service = client.app.state.services.inspiration
-
-    monkeypatch.setattr(service, "_run_agent_turn", lambda **_: (_ for _ in ()).throw(RuntimeError("agent boom")))
-
-    with pytest.raises(RuntimeError, match="agent boom"):
-        asyncio.run(
-            service.send_message(
-                session_id=session["id"],
-                text="请继续",
-                selected_items=[],
-                action=None,
-                image_usages=[],
-                images=[],
-                videos=[],
-            )
-        )
-
-
-def test_inspiration_progress_can_move_from_zero_to_hundred(client, monkeypatch):
-    session = create_session(client)
-    service = client.app.state.services.inspiration
-
-    progress_turns = iter(
-        [
-            {
-                "reply": "我先了解一下你这次想做的方向 🙂",
-                "stage": "briefing",
-                "locked": False,
-                "progress": 10,
-                "progress_label": "初始了解",
-                "options": {"items": [{"label": "我想做西安美食攻略", "action_hint": "describe_goal"}]},
-                "trace": [],
-            },
-            {
-                "reply": "风格已经对齐好了，我来继续整理提示词。",
-                "stage": "style_aligned",
-                "locked": False,
-                "progress": 35,
-                "progress_label": "风格确定",
-                "options": {"items": [{"label": "继续整理提示词", "action_hint": "continue_prompt"}]},
-                "trace": [],
-            },
-            {
-                "reply": "分图已经排好了，我准备直接启动生成。",
-                "stage": "allocation_ready",
-                "locked": True,
-                "progress": 78,
-                "progress_label": "分图规划",
-                "options": {"items": [{"label": "直接开始生成", "action_hint": "auto_generate"}]},
-                "trace": [],
-            },
-            {
-                "reply": "我已经帮你启动生成啦 🎨",
-                "stage": "generation_started",
-                "locked": True,
-                "progress": 100,
-                "progress_label": "生成已启动",
-                "active_job_id": "job-123",
-                "options": {"items": [{"label": "回到分图再调一下", "action_hint": "revise"}]},
-                "trace": [],
-            },
-        ]
-    )
-
-    monkeypatch.setattr(service, "_run_agent_turn", lambda **_: next(progress_turns))
-
-    progress_values: list[int] = []
-    for text in ["先聊聊方向", "这个风格挺好", "分图也可以", "那就开始生成"]:
-        response = client.post("/api/v1/inspirations/messages", data={"session_id": session["id"], "text": text})
-        assert response.status_code == 200
-        progress_values.append(response.json()["draft"]["progress"])
-
-    assert progress_values == [10, 35, 78, 100]
-
-
-def test_stream_endpoint_returns_sse_events(client, monkeypatch):
-    session = create_session(client)
-    service = client.app.state.services.inspiration
-
-    monkeypatch.setattr(
-        service.creative_agent,
-        "respond_stream",
-        lambda payload: iter(
-            [
-                {"event": "thinking", "data": {"step": 1, "message": "正在思考..."}},
-                {"event": "tool_start", "data": {"step": 2, "tool_name": "extract_assets", "message": "正在提取素材..."}},
-                {"event": "tool_done", "data": {"step": 2, "tool_name": "extract_assets", "message": "已提取素材：羊肉泡馍", "duration_ms": 12}},
-                {
-                    "event": "result",
-                    "data": {
-                        "reply": "我已经把素材整理好了。",
-                        "stage": "asset_ready",
-                        "locked": False,
-                        "progress": 52,
-                        "progress_label": "素材已整理",
-                        "options": {"items": [{"label": "继续分图", "action_hint": "continue_allocation"}]},
-                    },
-                },
-            ]
-        ),
-    )
-
-    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "西安攻略"})
-
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
-    events = _parse_sse_body(response.text)
-    assert [event["event"] for event in events] == ["thinking", "tool_start", "tool_done", "done"]
-
-
-def test_stream_emits_thinking_before_tool(client, monkeypatch):
-    session = create_session(client)
-    service = client.app.state.services.inspiration
-
-    monkeypatch.setattr(
-        service.creative_agent,
-        "respond_stream",
-        lambda payload: iter(
-            [
-                {"event": "thinking", "data": {"step": 1, "message": "正在思考..."}},
-                {"event": "tool_start", "data": {"step": 2, "tool_name": "generate_style_prompt", "message": "正在生成提示词..."}},
-                {"event": "tool_done", "data": {"step": 2, "tool_name": "generate_style_prompt", "message": "提示词已就绪", "duration_ms": 10}},
-                {"event": "result", "data": {"reply": "提示词我已经整理好了。", "stage": "prompt_ready", "locked": False}},
-            ]
-        ),
-    )
-
-    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "继续"})
-    events = _parse_sse_body(response.text)
-
-    assert events[0]["event"] == "thinking"
-    assert events[1]["event"] == "tool_start"
-    assert events[2]["event"] == "tool_done"
-
-
-def test_stream_done_contains_full_response(client, monkeypatch):
-    session = create_session(client)
-    service = client.app.state.services.inspiration
-
-    monkeypatch.setattr(
-        service.creative_agent,
-        "respond_stream",
-        lambda payload: iter(
-            [
-                {
-                    "event": "result",
-                    "data": {
-                        "reply": "我已经帮你整理好下一步方向啦。",
-                        "stage": "style_ready",
-                        "locked": False,
-                        "progress": 30,
-                        "progress_label": "风格确定",
-                        "options": {"items": [{"label": "继续提取素材", "action_hint": "extract_assets"}]},
-                    },
-                }
-            ]
-        ),
-    )
-
-    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "想做西安攻略"})
-    events = _parse_sse_body(response.text)
-
-    assert events[-1]["event"] == "done"
-    done_payload = events[-1]["data"]
-    assert done_payload["session_id"] == session["id"]
-    assert done_payload["draft"]["stage"] == "style_ready"
-    assert done_payload["draft"]["progress"] == 30
-    assert done_payload["messages"][-1]["content"] == "我已经帮你整理好下一步方向啦。"
-
-
-def test_stream_error_on_agent_failure(client, monkeypatch):
-    session = create_session(client)
-    service = client.app.state.services.inspiration
-
-    def raising_stream(payload):
-        raise RuntimeError("agent stream boom")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(service.creative_agent, "respond_stream", raising_stream)
-
-    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "继续"})
-    events = _parse_sse_body(response.text)
-
-    assert events[-1]["event"] == "error"
-    assert events[-1]["data"]["code"] == "E-1099"
-
-
-def test_stream_suggest_painting_style_uses_request_session_id(client, monkeypatch, tmp_path):
+def test_apply_agent_turn_persists_updated_style_stage(client):
     from backend.app.agent.creative_agent import CreativeAgent
-    from backend.app.agent.tools import build_creative_tools
 
     session = create_session(client)
     service = client.app.state.services.inspiration
-    observed_session_ids: list[str] = []
+    state = service._ensure_state(session["id"])
 
-    monkeypatch.setattr(
-        service.style_service,
-        "chat",
-        lambda *, session_id, stage, user_reply, selected_items: (
-            observed_session_ids.append(session_id)
-            or {
-                "reply": "我先帮你梳理风格方向。",
-                "options": {"title": "请选择", "items": ["自然写实"], "max": 1},
-                "stage": stage,
-                "next_stage": stage,
-                "is_finished": False,
-                "fallback_used": False,
-            }
-        ),
+    agent = CreativeAgent.__new__(CreativeAgent)
+    request = {
+        "session_id": session["id"],
+        "state": {
+            "stage": "initial_understanding",
+            "style_stage": "painting_style",
+            "locked": False,
+        },
+    }
+    captured = agent._capture_tool_output(
+        tool_name="suggest_painting_style",
+        tool_result={
+            "reply": "我们接下来看看背景装饰。",
+            "stage": "background_decor",
+            "next_stage": "color_mood",
+            "options": {"title": "请选择", "items": ["手账贴纸"], "max": 1},
+            "is_finished": False,
+            "fallback_used": False,
+        },
+        request=request,
     )
-
-    agent = CreativeAgent(
-        llm_provider=_FakeLLMProvider(
-            [
-                {
-                    "decision": "use_tool",
-                    "reason": "先给出风格建议。",
-                    "tool_name": "suggest_painting_style",
-                    "tool_args": {
-                        "session_id": "wrong-session",
-                        "stage": "painting_style",
-                        "user_reply": "我想做西安攻略",
-                        "selected_items": [],
-                    },
-                },
-                {
-                    "decision": "respond_directly",
-                    "reason": "风格建议已经完成。",
-                    "result": {
-                        "reply": "我已经拿到风格建议了。",
-                        "stage": "style_ready",
-                        "locked": False,
-                        "progress": 22,
-                        "progress_label": "风格分析",
-                        "options": {"items": [{"label": "继续", "action_hint": "continue"}]},
-                    },
-                },
-            ]
-        ),
-        tools=build_creative_tools(service),
-        db_path=tmp_path / "stream-agent.db",
-    )
-    monkeypatch.setattr(service, "creative_agent", agent)
-
-    response = client.post("/api/v1/inspirations/messages/stream", data={"session_id": session["id"], "text": "我想做西安攻略"})
-
-    assert response.status_code == 200
-    events = _parse_sse_body(response.text)
-    assert events[0]["event"] == "thinking"
-    assert observed_session_ids == [session["id"]]
-
-
-def test_stream_overlap_does_not_leak_session_context(client, monkeypatch):
-    import threading
-
-    session_a = create_session(client, title="会话A")
-    session_b = create_session(client, title="会话B")
-    service = client.app.state.services.inspiration
-    barrier = threading.Barrier(2)
-    observed: list[str] = []
-
-    monkeypatch.setattr(
-        service.style_service,
-        "chat",
-        lambda *, session_id, stage, user_reply, selected_items: (
-            barrier.wait(timeout=2),
-            observed.append(session_id),
-            {
-                "reply": f"风格建议-{session_id}",
-                "options": {"title": "请选择", "items": ["自然写实"], "max": 1},
-                "stage": stage,
-                "next_stage": stage,
-                "is_finished": False,
-                "fallback_used": False,
-            },
-        )[-1],
-    )
-
-    def make_stream(payload):
-        service.suggest_painting_style(
-            session_id=payload["session_id"],
-            stage="painting_style",
-            user_reply=payload.get("text") or "",
-            selected_items=payload.get("selected_items") or [],
-        )
-        yield {"event": "result", "data": {"reply": "完成", "stage": "style_ready", "locked": False}}
-
-    monkeypatch.setattr(service.creative_agent, "respond_stream", make_stream)
-
-    responses: list[str] = []
-
-    def run_stream(session_id: str) -> None:
-        generator = asyncio.run(
-            service.send_message_stream(
-                session_id=session_id,
-                text="继续",
-                selected_items=[],
-                action=None,
-                image_usages=[],
-                images=[],
-                videos=[],
-            )
-        )
-        responses.append("".join(list(generator)))
-
-    thread_a = threading.Thread(target=run_stream, args=(session_a["id"],))
-    thread_b = threading.Thread(target=run_stream, args=(session_b["id"],))
-    thread_a.start()
-    thread_b.start()
-    thread_a.join()
-    thread_b.join()
-
-    assert set(observed) == {session_a["id"], session_b["id"]}
-    assert len(responses) == 2
-
-
-def test_non_stream_endpoint_unchanged(client, monkeypatch):
-    session = create_session(client)
-    service = client.app.state.services.inspiration
-
-    monkeypatch.setattr(
-        service,
-        "_run_agent_turn",
-        lambda **_: {
-            "reply": "普通端点仍然返回完整 JSON。",
+    merged_request = agent._merge_result_into_request(request, "suggest_painting_style", captured)
+    turn = agent._capture_direct_response(
+        merged_request,
+        {
+            "reply": "先看看背景装饰方向。",
             "stage": "style_ready",
             "locked": False,
-            "progress": 20,
-            "progress_label": "风格确定",
+        },
+    )
+
+    service._apply_agent_turn(session_id=session["id"], state=state, turn=turn)
+
+    updated = service._ensure_state(session["id"])
+    assert updated["style_stage"] == "background_decor"
+
+
+def test_apply_agent_turn_force_unlocks_non_terminal_stage(client):
+    session = create_session(client)
+    service = client.app.state.services.inspiration
+    state = service._ensure_state(session["id"])
+
+    service._apply_agent_turn(
+        session_id=session["id"],
+        state=state,
+        turn={
+            "reply": "先继续确认色彩情绪。",
+            "stage": "color_mood",
+            "locked": True,
+            "progress": 26,
+            "progress_label": "确认色彩情绪",
             "options": {"items": [{"label": "继续", "action_hint": "continue"}]},
             "trace": [],
         },
     )
 
-    response = client.post("/api/v1/inspirations/messages", data={"session_id": session["id"], "text": "继续"})
+    updated = service._ensure_state(session["id"])
+    assert updated["locked"] is False
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["draft"]["stage"] == "style_ready"
-    assert body["messages"][-1]["content"] == "普通端点仍然返回完整 JSON。"
+

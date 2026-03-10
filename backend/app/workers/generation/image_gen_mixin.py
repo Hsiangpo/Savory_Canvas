@@ -26,7 +26,7 @@ class GenerationImageGenMixin:
         total_images = len(prompt_specs)
         if total_images <= 0:
             return [], 0, None
-        max_retry_per_slot = 2
+        max_retry_per_slot = 4
         max_total_attempts = total_images * (max_retry_per_slot + 1)
         attempts_by_slot = [0] * total_images
         pending_slots = list(range(total_images))
@@ -72,7 +72,8 @@ class GenerationImageGenMixin:
                     provider_id=image_provider["id"],
                     model_name=image_model_name,
                     prompt=spec["prompt_text"],
-                    reference_image_paths=self._build_reference_chain_for_slot(
+                    reference_image_paths=self._select_reference_paths_for_attempt(
+                        attempt=attempt,
                         slot=slot,
                         base_reference_paths=base_reference_paths,
                         results_by_slot=results_by_slot,
@@ -118,6 +119,31 @@ class GenerationImageGenMixin:
 
         ordered_results = [results_by_slot[slot] for slot in sorted(results_by_slot.keys())]
         return ordered_results, len(failed_slots), last_error_message
+
+
+    def _select_reference_paths_for_attempt(
+        self,
+        *,
+        attempt: int,
+        slot: int,
+        base_reference_paths: list[str],
+        results_by_slot: dict[int, dict[str, Any]],
+        allow_image_reference: bool,
+    ) -> list[str]:
+        reference_paths = self._build_reference_chain_for_slot(
+            slot=slot,
+            base_reference_paths=base_reference_paths,
+            results_by_slot=results_by_slot,
+            allow_image_reference=allow_image_reference,
+        )
+        if attempt >= 3:
+            return []
+        if attempt == 2 and slot > 0:
+            previous_result = results_by_slot.get(slot - 1)
+            previous_path = previous_result.get("image_path") if previous_result else None
+            if isinstance(previous_path, str) and previous_path.strip():
+                return []
+        return reference_paths
 
     def _is_retryable_image_failure(self, error: DomainError) -> bool:
         message = str(error.message or "").lower()

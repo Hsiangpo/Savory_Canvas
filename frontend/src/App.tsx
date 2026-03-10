@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import SessionPanel from './components/SessionPanel';
 import InspirationPanel from './components/InspirationPanel';
-import GeneratePanel from './components/GeneratePanel';
 import ResultPanel from './components/ResultPanel';
 import ExportPanel from './components/ExportPanel';
 import ModelPanel from './components/ModelPanel';
@@ -31,9 +30,6 @@ function App() {
       </div>
 
       <div className="layout-right">
-        <div className="panel panel-glass right-panel-progress">
-          <GeneratePanel />
-        </div>
         <div className="panel panel-glass right-panel-result">
           <ResultPanel />
         </div>

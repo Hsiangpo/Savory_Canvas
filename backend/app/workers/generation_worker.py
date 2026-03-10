@@ -99,43 +99,29 @@ class GenerationWorker(
                 image_model_name=image_model_name,
                 capabilities=image_model_capabilities,
             )
-            planned_images = self._build_planned_copy_images(prompt_specs)
-            image_task = asyncio.create_task(
-                self._run_image_generate_stage(
-                    job=job,
-                    prompt_specs=prompt_specs,
-                    source_assets=assets,
-                    style=style,
-                    image_provider=image_provider,
-                    image_model_name=image_model_name,
-                    allow_image_reference=allow_image_reference,
-                )
+            image_outcome = await self._run_image_generate_stage(
+                job=job,
+                prompt_specs=prompt_specs,
+                source_assets=assets,
+                style=style,
+                image_provider=image_provider,
+                image_model_name=image_model_name,
+                allow_image_reference=allow_image_reference,
             )
-            copy_task = asyncio.create_task(
-                self._run_copy_generate_stage(
-                    job=job,
-                    style=style,
-                    planned_images=planned_images,
-                    content_mode=content_mode,
-                    breakdown=breakdown,
-                )
-            )
-            image_outcome, copy_outcome = await asyncio.gather(image_task, copy_task, return_exceptions=True)
-
-            if isinstance(image_outcome, Exception):
-                if isinstance(image_outcome, DomainError):
-                    self._fail(job_id, image_outcome.code, image_outcome.message)
-                else:
-                    self._fail(job_id, "E-1099", "生成流程异常")
-                return
             created_images, failed_images = image_outcome
 
             copy_error_message: str | None
-            if isinstance(copy_outcome, Exception):
-                logger.exception("文案并行任务异常: job_id=%s", job_id)
+            try:
+                copy_error_message = await self._run_copy_generate_stage(
+                    job=job,
+                    style=style,
+                    planned_images=created_images or self._build_planned_copy_images(prompt_specs),
+                    content_mode=content_mode,
+                    breakdown=breakdown,
+                )
+            except Exception:
+                logger.exception("文案任务异常: job_id=%s", job_id)
                 copy_error_message = "文案生成失败：系统内部错误"
-            else:
-                copy_error_message = copy_outcome
 
             if self._is_canceled(job_id):
                 return
@@ -213,7 +199,8 @@ class GenerationWorker(
         self._advance(job["id"], "running", 62, "copy_generate", "正在生成文案结构")
         await asyncio.sleep(0)
         try:
-            copy_result = self._generate_copy_result(
+            copy_result = await asyncio.to_thread(
+                self._generate_copy_result,
                 job=job,
                 style=style,
                 images=planned_images,
@@ -225,30 +212,19 @@ class GenerationWorker(
             self._complete_stage(job["id"], progress=92, stage="copy_generate", stage_message="文案生成完成")
             return None
         except DomainError as error:
-            logger.warning("文案生成失败，保留已产出的图片结果: job_id=%s reason=%s", job["id"], error.message)
-            self.result_repo.upsert_copy(
-                {
-                    "id": new_id(),
-                    "job_id": job["id"],
-                    "title": "",
-                    "intro": "",
-                    "guide_sections": [],
-                    "ending": "",
-                    "full_text": "",
-                    "created_at": now_iso(),
-                }
-            )
-            self._advance(
-                job["id"],
-                "running",
-                92,
-                "copy_generate",
-                "文案生成失败，已保留图片结果",
-                error_code=error.code,
+            logger.warning("文案生成失败，切换到本地兜底文案: job_id=%s reason=%s", job["id"], error.message)
+            fallback_copy = self._build_fallback_copy_payload(
+                job=job,
+                style=style,
+                images=planned_images,
+                content_mode=content_mode,
+                breakdown=breakdown,
                 error_message=error.message,
-                log_status="failed",
             )
-            return error.message
+            self._advance(job["id"], "running", 88, "copy_generate", "上游文案失败，正在生成兜底文案")
+            self.result_repo.upsert_copy(fallback_copy)
+            self._complete_stage(job["id"], progress=92, stage="copy_generate", stage_message="文案兜底生成完成")
+            return None
 
     def _require_job(self, job_id: str) -> dict[str, Any]:
         job = self.job_repo.get(job_id)

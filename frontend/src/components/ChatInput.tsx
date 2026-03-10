@@ -41,6 +41,8 @@ export function ChatInput(
     onSend: () => void;
   },
 ) {
+  const textareaId = 'chat-input-textarea';
+
   return (
     <>
       {pendingFiles.length > 0 && (
@@ -117,14 +119,33 @@ export function ChatInput(
         style={{ borderRadius: '8px', padding: '8px' }}
       >
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <input type="file" ref={fileInputRef} style={{ display: 'none' }} multiple accept="image/*,video/*" onChange={onFileChange} />
+          <input type="file" ref={fileInputRef} hidden name="chat-attachment-input" aria-label="附件上传" style={{ display: 'none' }} multiple accept="image/*,video/*" onChange={onFileChange} />
           <button className="btn btn-secondary" style={{ padding: '8px' }} title="添加附件" disabled={isLoading || draftLocked} onClick={() => fileInputRef.current?.click()}>
             <Paperclip size={18} />
           </button>
+          <label
+            htmlFor={textareaId}
+            style={{
+              position: 'absolute',
+              width: '1px',
+              height: '1px',
+              padding: 0,
+              margin: '-1px',
+              overflow: 'hidden',
+              clip: 'rect(0, 0, 0, 0)',
+              whiteSpace: 'nowrap',
+              border: 0,
+            }}
+          >
+            对话输入
+          </label>
           <textarea
+            id={textareaId}
             ref={inputTextRef}
             className="input"
-            placeholder={draftLocked ? '方案已锁定，可继续让 Agent 保存风格、开始生成或解释当前方案。' : '输入描述，支持同时上传文本、图片、视频（Enter发送，Shift/Ctrl+Enter换行）。'}
+            name="chat-input"
+            aria-label="对话输入"
+            placeholder={draftLocked ? '方案已锁定，可继续让 Agent 保存风格、开始生成或解释当前方案。' : '输入描述，可直接拖拽视频或图片到这里上传（Enter发送，Shift/Ctrl+Enter换行）。'}
             value={inputText}
             disabled={isLoading}
             onChange={(event) => onInputChange(event.target.value)}
@@ -152,9 +173,6 @@ export function ChatInput(
           <button className="btn btn-primary" disabled={(!inputText.trim() && pendingFiles.length === 0) || isLoading} onClick={onSend}>
             发送
           </button>
-        </div>
-        <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', paddingLeft: '4px' }}>
-          可直接拖拽图片或视频到输入区上传。
         </div>
       </div>
     </>

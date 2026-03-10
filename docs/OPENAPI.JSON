@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Savory Canvas API",
-    "version": "1.2.2",
-    "description": "Savory Canvas 本地图文生成系统接口文档"
+    "version": "1.2.5",
+    "description": "Savory Canvas 本地图文生成系统接口文档（2026-03-09 审查性整理：前端轮询与展示修正、内部服务重构，无契约变更）"
   },
   "servers": [
     {
@@ -2631,7 +2631,8 @@
               "enum": [
                 "image_generation",
                 "text_generation",
-                "vision"
+                "vision",
+                "transcription"
               ]
             }
           }
@@ -2674,13 +2675,17 @@
         "type": "object",
         "required": [
           "image_model",
-          "text_model"
+          "text_model",
+          "transcript_model"
         ],
         "properties": {
           "image_model": {
             "$ref": "#/components/schemas/ModelReference"
           },
           "text_model": {
+            "$ref": "#/components/schemas/ModelReference"
+          },
+          "transcript_model": {
             "$ref": "#/components/schemas/ModelReference"
           }
         }
@@ -2690,6 +2695,7 @@
         "required": [
           "image_model",
           "text_model",
+          "transcript_model",
           "updated_at"
         ],
         "properties": {
@@ -2697,6 +2703,9 @@
             "$ref": "#/components/schemas/ModelReference"
           },
           "text_model": {
+            "$ref": "#/components/schemas/ModelReference"
+          },
+          "transcript_model": {
             "$ref": "#/components/schemas/ModelReference"
           },
           "updated_at": {
@@ -2807,3 +2816,4 @@
     }
   }
 }
+

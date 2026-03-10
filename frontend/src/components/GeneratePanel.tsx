@@ -1,7 +1,6 @@
 import { Loader2, XCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useEffect, useState, useMemo } from 'react';
-import * as api from '../api';
 
 const STAGE_NAME_MAP: Record<string, string> = {
   plan_ready: '方案加载',
@@ -9,54 +8,6 @@ const STAGE_NAME_MAP: Record<string, string> = {
   copy_generate: '文案生成',
   finalize: '完成',
 };
-
-const CN_ORDINALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
-
-function formatPromptLabel(index: number): string {
-  if (index >= 0 && index < CN_ORDINALS.length) {
-    return `第${CN_ORDINALS[index]}张`;
-  }
-  return `第${index + 1}张`;
-}
-
-function splitImagePrompts(stylePrompt: string, expectedCount?: number): string[] {
-  const normalized = stylePrompt.replace(/\r\n/g, '\n').trim();
-  if (!normalized) return [];
-
-  const numberedMatches = normalized.match(/第[一二三四五六七八九十0-9]+张(?:（[^）]*）)?[：:][\s\S]*?(?=第[一二三四五六七八九十0-9]+张(?:（[^）]*）)?[：:]|$)/g);
-  if (numberedMatches && numberedMatches.length > 0) {
-    return numberedMatches.map((item) => item.trim());
-  }
-
-  const oneByOneMatches = normalized.match(/生成一张[\s\S]*?(?=生成一张|$)/g);
-  if (oneByOneMatches && oneByOneMatches.length > 1) {
-    return oneByOneMatches.map((item) => item.trim());
-  }
-
-  const paragraphItems = normalized
-    .split(/\n{2,}/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (paragraphItems.length > 1) {
-    const segmentedParagraphCount = paragraphItems.filter((item) => item.startsWith('生成一张') || /^第[一二三四五六七八九十0-9]+张(?:（[^）]*）)?[：:]/.test(item)).length;
-    if (segmentedParagraphCount === paragraphItems.length) {
-      return paragraphItems;
-    }
-    if ((expectedCount || 0) > 1 && paragraphItems.length === expectedCount && segmentedParagraphCount >= Math.max(1, (expectedCount || 1) - 1)) {
-      return paragraphItems;
-    }
-  }
-
-  if ((expectedCount || 0) === 1) {
-    return [normalized];
-  }
-
-  if (paragraphItems.length > 1 && paragraphItems.length <= 2) {
-    return paragraphItems;
-  }
-
-  return [normalized];
-}
 
 function normalizeStageName(stageName: string): string {
   if (stageName === 'asset_extract' || stageName === 'asset_allocate' || stageName === 'prompt_generate') {
@@ -66,7 +17,7 @@ function normalizeStageName(stageName: string): string {
 }
 
 export default function GeneratePanel() {
-  const { latestJob, cancelJob, pollJobStatus, draft, latestStages, latestAssetBreakdown } = useAppStore();
+  const { latestJob, cancelJob, pollJobStatus, latestStages } = useAppStore();
   const [stagesExpanded, setStagesExpanded] = useState(true);
 
   const isRunning = latestJob?.status === 'running' || latestJob?.status === 'queued';
@@ -107,13 +58,6 @@ export default function GeneratePanel() {
     }
     return groups;
   }, [latestStages]);
-
-  const stylePayload = (draft?.style_payload as api.StylePayload | undefined) || undefined;
-  const allocationPlan = draft?.allocation_plan || [];
-  const stylePromptItems = useMemo(() => {
-    const stylePrompt = String(stylePayload?.style_prompt || '').trim();
-    return splitImagePrompts(stylePrompt, draft?.image_count);
-  }, [stylePayload?.style_prompt, draft?.image_count]);
 
   // Determine the "current" (most recent non-success) stage for highlighting
   const currentStageName = useMemo(() => {
@@ -237,99 +181,6 @@ export default function GeneratePanel() {
           )}
         </div>
       )}
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-        {draft?.locked ? (
-          <div className="stages-card" style={{ padding: '16px', backgroundColor: 'var(--bg-glass-hover)', border: '1px solid var(--accent-alpha)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <h3 style={{ margin: 0, fontSize: '0.95rem', color: 'var(--accent-color)' }}>方案已锁定</h3>
-              <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)' }}>
-                待生成：{draft.image_count || '-'} 张
-              </div>
-            </div>
-            
-            {((draft.style_payload as api.StylePayload)?.painting_style) ? (
-              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'grid', gap: '8px' }}>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <strong style={{ minWidth: '65px', color: 'var(--text-primary)' }}>绘画风格：</strong>
-                  <span>{String((draft.style_payload as api.StylePayload).painting_style)}</span>
-                </div>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <strong style={{ minWidth: '65px', color: 'var(--text-primary)' }}>色彩情绪：</strong>
-                  <span>{String((draft.style_payload as api.StylePayload).color_mood)}</span>
-                </div>
-                {((draft.style_payload as api.StylePayload).extra_keywords?.length ?? 0) > 0 ? (
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    <strong style={{ minWidth: '65px', color: 'var(--text-primary)' }}>关键词：</strong>
-                    <span>{((draft.style_payload as api.StylePayload).extra_keywords || []).join('、')}</span>
-                  </div>
-                ) : null}
-                {stylePromptItems.length > 0 ? (
-                  <div style={{ display: 'grid', gap: '8px', marginTop: '4px' }}>
-                    <strong style={{ minWidth: '65px', color: 'var(--text-primary)' }}>母提示词：</strong>
-                    <div
-                      style={{
-                        maxHeight: '180px',
-                        overflowY: 'auto',
-                        display: 'grid',
-                        gap: '8px',
-                        paddingRight: '4px',
-                      }}
-                    >
-                      {stylePromptItems.map((prompt, index) => (
-                        <div
-                          key={`${index}-${prompt.slice(0, 12)}`}
-                          style={{
-                            background: 'rgba(255, 255, 255, 0.03)',
-                            border: '1px solid var(--border-color)',
-                            borderRadius: '8px',
-                            padding: '8px',
-                          }}
-                        >
-                          <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
-                            {formatPromptLabel(index)}：
-                          </div>
-                          <div style={{ fontStyle: 'italic', opacity: 0.9, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
-                            {prompt}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            
-            {(latestAssetBreakdown?.extracted?.foods?.length || latestAssetBreakdown?.extracted?.scenes?.length || latestAssetBreakdown?.extracted?.keywords?.length) ? (
-              <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color)', fontSize: '0.85rem' }}>
-                <div style={{ marginBottom: '6px', color: 'var(--text-primary)', fontWeight: 500 }}>提取结果摘要：</div>
-                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                  {(latestAssetBreakdown.extracted?.foods || []).map((f: string, i: number) => <span key={`f-${i}`} style={{ padding: '2px 8px', background: 'rgba(234, 179, 8, 0.1)', color: '#eab308', borderRadius: '12px', fontSize: '0.75rem' }}>{f}</span>)}
-                  {(latestAssetBreakdown.extracted?.scenes || []).map((s: string, i: number) => <span key={`s-${i}`} style={{ padding: '2px 8px', background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8', borderRadius: '12px', fontSize: '0.75rem' }}>{s}</span>)}
-                </div>
-              </div>
-            ) : null}
-
-            {allocationPlan.length > 0 && (
-              <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color)', fontSize: '0.85rem' }}>
-                <div style={{ marginBottom: '6px', color: 'var(--text-primary)', fontWeight: 500 }}>分图计划：</div>
-                <div style={{ display: 'grid', gap: '8px' }}>
-                  {allocationPlan.map((item) => (
-                    <div key={`allocation-${item.slot_index}-${item.focus_title}`} style={{ border: '1px solid var(--border-color)', borderRadius: '8px', padding: '8px', background: 'rgba(255,255,255,0.03)' }}>
-                      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>第{item.slot_index}张：{item.focus_title}</div>
-                      <div style={{ marginTop: '4px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>{item.focus_description}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="input" style={{ padding: '12px', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-             请先在左侧完成灵感对话确认方案并锁定
-          </div>
-        )}
-      </div>
 
       {status === 'idle' && (
         <div style={{

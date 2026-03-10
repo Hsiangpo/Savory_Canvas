@@ -43,6 +43,14 @@ function formatFileDisplayName(file: File, index: number): string {
   return `图片 ${index + 1} · ${baseName.slice(0, 27)}...`;
 }
 
+const STYLE_SEARCH_INPUT_ID = 'style-management-search-input';
+const STYLE_NAME_INPUT_ID = 'style-management-name-input';
+const STYLE_PAINTING_INPUT_ID = 'style-management-painting-style-input';
+const STYLE_COLOR_INPUT_ID = 'style-management-color-mood-input';
+const STYLE_PROMPT_EXAMPLE_INPUT_ID = 'style-management-prompt-example-input';
+const STYLE_KEYWORDS_INPUT_ID = 'style-management-keywords-input';
+const STYLE_SAMPLE_IMAGES_INPUT_ID = 'style-management-sample-images-input';
+
 export default function StyleManagementDrawer({ onClose, onApply }: Props) {
   const { styleProfileList, fetchStyles, createStyle, updateStyle, deleteStyle, activeSessionId, addToast } = useAppStore();
   const [editingStyle, setEditingStyle] = useState<Partial<StyleProfile> | null>(null);
@@ -75,12 +83,11 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
     return styleProfileList.filter((style) => normalizeSearchText(style).includes(keyword));
   }, [searchText, styleProfileList]);
 
-  const groupedStyles = useMemo(() => {
-    const globalStyles = filteredStyles.filter((style) => style.is_builtin || !style.session_id);
-    const sessionStyles = filteredStyles.filter((style) => style.session_id && style.session_id === activeSessionId);
-    const otherStyles = filteredStyles.filter((style) => style.session_id && style.session_id !== activeSessionId);
-    return { globalStyles, sessionStyles, otherStyles };
-  }, [activeSessionId, filteredStyles]);
+  const visibleStyles = useMemo(() => {
+    const builtinStyles = filteredStyles.filter((style) => style.is_builtin);
+    const userStyles = filteredStyles.filter((style) => !style.is_builtin);
+    return [...builtinStyles, ...userStyles];
+  }, [filteredStyles]);
 
   const clearDraftSampleImages = useCallback(() => {
     setDraftSampleImages((current) => {
@@ -252,9 +259,6 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
         <div>
           <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{style.name}</div>
-          <div style={{ marginTop: '4px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-            {style.is_builtin ? '全局预设' : style.session_id ? '会话风格' : '全局自定义'}
-          </div>
         </div>
         <div style={{ display: 'flex', gap: '6px' }}>
           <button className="btn btn-primary" title="应用风格" onClick={() => onApply(style)} style={{ padding: '6px' }}>
@@ -325,19 +329,20 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
         {isFormVisible ? (
           <form key={formRenderKey} onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>风格名称</label>
-            <input name="name" className="input" defaultValue={editingStyle?.name || ''} required />
-            <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>绘画风格</label>
-            <input name="painting_style" className="input" defaultValue={editingStyle?.style_payload?.painting_style || ''} required />
-            <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>色彩情绪</label>
-            <input name="color_mood" className="input" defaultValue={editingStyle?.style_payload?.color_mood || ''} required />
-            <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>风格提示词样例（给智能体对话参考）</label>
-            <textarea name="prompt_example" className="input" defaultValue={editingStyle?.style_payload?.prompt_example || ''} required style={{ minHeight: '70px' }} />
+            <label htmlFor={STYLE_NAME_INPUT_ID} style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>风格名称</label>
+            <input id={STYLE_NAME_INPUT_ID} name="name" className="input" defaultValue={editingStyle?.name || ''} required />
+            <label htmlFor={STYLE_PAINTING_INPUT_ID} style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>绘画风格</label>
+            <input id={STYLE_PAINTING_INPUT_ID} name="painting_style" className="input" defaultValue={editingStyle?.style_payload?.painting_style || ''} required />
+            <label htmlFor={STYLE_COLOR_INPUT_ID} style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>色彩情绪</label>
+            <input id={STYLE_COLOR_INPUT_ID} name="color_mood" className="input" defaultValue={editingStyle?.style_payload?.color_mood || ''} required />
+            <label htmlFor={STYLE_PROMPT_EXAMPLE_INPUT_ID} style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>风格提示词样例（给智能体对话参考）</label>
+            <textarea id={STYLE_PROMPT_EXAMPLE_INPUT_ID} name="prompt_example" className="input" defaultValue={editingStyle?.style_payload?.prompt_example || ''} required style={{ minHeight: '70px' }} />
             <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
               系统会基于“风格提示词样例 + 对话上下文”自动生成当次母提示词，无需手动填写。
             </div>
-            <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>风格细节关键词（可选，逗号分隔）</label>
+            <label htmlFor={STYLE_KEYWORDS_INPUT_ID} style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>风格细节关键词（可选，逗号分隔）</label>
             <input
+              id={STYLE_KEYWORDS_INPUT_ID}
               name="extra_keywords"
               className="input"
               placeholder="示例：泛黄纸张，手绘箭头，纸胶带，复古邮票"
@@ -346,8 +351,9 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
             <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
               用来补充画面细节偏好（纹理、装饰、小元素、氛围词），会参与最终生图提示词生成。
             </div>
-            <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>样例图</label>
+            <label htmlFor={STYLE_SAMPLE_IMAGES_INPUT_ID} style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>样例图</label>
             <input
+              id={STYLE_SAMPLE_IMAGES_INPUT_ID}
               ref={uploadImageInputRef}
               type="file"
               accept="image/*"
@@ -528,8 +534,27 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
         ) : (
           <>
             <div style={{ display: 'flex', gap: '8px' }}>
+              <label
+                htmlFor={STYLE_SEARCH_INPUT_ID}
+                style={{
+                  position: 'absolute',
+                  width: '1px',
+                  height: '1px',
+                  padding: 0,
+                  margin: '-1px',
+                  overflow: 'hidden',
+                  clip: 'rect(0, 0, 0, 0)',
+                  whiteSpace: 'nowrap',
+                  border: 0,
+                }}
+              >
+                搜索风格
+              </label>
               <input
+                id={STYLE_SEARCH_INPUT_ID}
+                name="style-search"
                 className="input"
+                aria-label="搜索风格"
                 placeholder="搜索风格名称/关键词"
                 value={searchText}
                 onChange={(event) => setSearchText(event.target.value)}
@@ -538,9 +563,7 @@ export default function StyleManagementDrawer({ onClose, onApply }: Props) {
                 <Plus size={16} /> 新增
               </button>
             </div>
-            {renderStyleSection('全局与系统风格', groupedStyles.globalStyles)}
-            {renderStyleSection('智能体会话风格（只读参考）', groupedStyles.sessionStyles)}
-            {renderStyleSection('其他会话风格（只读参考）', groupedStyles.otherStyles)}
+            {renderStyleSection('风格库', visibleStyles)}
           </>
         )}
       </div>

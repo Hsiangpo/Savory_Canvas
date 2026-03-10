@@ -23,6 +23,7 @@ def client(tmp_path, monkeypatch, request):
             {"id": "gpt-image-1", "name": "gpt-image-1", "capabilities": ["image_generation"]},
             {"id": "gpt-4.1-mini", "name": "gpt-4.1-mini", "capabilities": ["text_generation"]},
             {"id": "gpt-4.1", "name": "gpt-4.1", "capabilities": ["text_generation", "vision"]},
+            {"id": "whisper-large-v3-turbo", "name": "whisper-large-v3-turbo", "capabilities": ["transcription"]},
         ]
 
     def fake_generate_image_binary(_self, **_kwargs):
@@ -170,6 +171,7 @@ def setup_model_routing(
     *,
     image_model_name: str = "gpt-image-1",
     text_model_name: str = "gpt-4.1-mini",
+    transcript_model_name: str = "whisper-large-v3-turbo",
 ) -> dict[str, Any]:
     provider = create_provider(client)
     response = client.post(
@@ -182,6 +184,10 @@ def setup_model_routing(
             "text_model": {
                 "provider_id": provider["id"],
                 "model_name": text_model_name,
+            },
+            "transcript_model": {
+                "provider_id": provider["id"],
+                "model_name": transcript_model_name,
             },
         },
     )

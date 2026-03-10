@@ -28,6 +28,7 @@ async def create_video_asset(
     service: AssetService = Depends(get_asset_service),
     storage: Storage = Depends(get_storage),
 ) -> dict:
+    service.ensure_video_upload_ready(session_id)
     source_name = file.filename or "upload.mp4"
     source_path = Path(source_name)
     stem = source_path.stem or "upload"

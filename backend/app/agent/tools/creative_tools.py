@@ -22,6 +22,11 @@ def build_creative_tools(runtime: Any) -> dict[str, Any]:
         return runtime.extract_assets(session_id=session_id, user_hint=user_hint, style_prompt=style_prompt)
 
     @tool
+    def recommend_city_content_combos(session_id: str, limit: int = 2) -> dict[str, Any]:
+        """根据当前内容模式推荐 1-4 套城市、景点与美食候选组合。"""
+        return runtime.recommend_city_content_combos(session_id=session_id, limit=limit)
+
+    @tool
     def generate_style_prompt(session_id: str, feedback: str) -> dict[str, Any]:
         """根据当前草稿风格和反馈生成母提示词。"""
         return runtime.generate_style_prompt(session_id=session_id, feedback=feedback)
@@ -37,9 +42,11 @@ def build_creative_tools(runtime: Any) -> dict[str, Any]:
         return runtime.save_style_from_agent(session_id=session_id)
 
     @tool
-    def generate_images(session_id: str) -> dict[str, Any]:
-        """按当前会话锁定草案创建图片生成任务。"""
-        return runtime.generate_images(session_id=session_id)
+    def generate_images(session_id: str, draft_state: dict[str, Any] | None = None) -> dict[str, Any]:
+        """按当前会话锁定草案创建图片生成任务。支持传入本轮已整理好的草案状态。"""
+        if draft_state is None:
+            return runtime.generate_images(session_id=session_id)
+        return runtime.generate_images(session_id=session_id, draft_state=draft_state)
 
     @tool
     def reset_progress(session_id: str, reset_to: str) -> dict[str, Any]:
@@ -54,6 +61,7 @@ def build_creative_tools(runtime: Any) -> dict[str, Any]:
     return {
         "suggest_painting_style": suggest_painting_style,
         "extract_assets": extract_assets,
+        "recommend_city_content_combos": recommend_city_content_combos,
         "generate_style_prompt": generate_style_prompt,
         "allocate_assets_to_images": allocate_assets_to_images,
         "save_style": save_style,

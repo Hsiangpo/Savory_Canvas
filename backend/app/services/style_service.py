@@ -94,15 +94,13 @@ class StyleService(StyleModelCallerMixin, StyleProtocolAdapterMixin, StylePayloa
         }
 
     def create(self, session_id: str | None, name: str, style_payload: dict[str, Any]) -> dict[str, Any]:
-        if session_id and not self.session_repo.get(session_id):
-            raise not_found("会话", session_id)
         normalized_payload = self._normalize_style_payload(style_payload)
         self._validate_sample_image_assets(session_id=session_id, style_payload=normalized_payload, strict=True)
         self._sync_sample_image_snapshot(normalized_payload, previous_payload=None)
         now = now_iso()
         profile = {
             "id": new_id(),
-            "session_id": session_id,
+            "session_id": None,
             "name": name,
             "style_payload": normalized_payload,
             "is_builtin": False,

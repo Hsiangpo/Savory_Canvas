@@ -63,6 +63,10 @@ class Database:
                 ("ending", "TEXT NOT NULL DEFAULT ''"),
                 ("full_text", "TEXT NOT NULL DEFAULT ''"),
             ],
+            "model_routing_config": [
+                ("transcript_model_provider_id", "TEXT"),
+                ("transcript_model_name", "TEXT"),
+            ],
         }
         for table_name, columns in table_columns.items():
             self._ensure_table_columns(conn, table_name, columns)

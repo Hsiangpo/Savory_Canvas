@@ -80,3 +80,35 @@
 | What's the goal? | 后端全量需求实现并通过测试 |
 | What have I learned? | 见 findings.md |
 | What have I done? | 见本文件记录 |
+## Session: 2026-03-09 审计与联调
+
+### Phase A: 全链路体检
+- **Status:** in_progress
+- Actions taken:
+  - 读取 `systematic-debugging`、`planning-with-files`、`verification-before-completion`、`test-driven-development`、`brainstorming` 技能约束。
+  - 运行 `pytest backend/tests -q`，结果 `164 passed`。
+  - 运行前端 `npm run build`，结果通过；`npm run lint` 已运行，无错误输出。
+  - 运行 `python scripts/check_limits.py` 发现 Windows GBK 控制台 Unicode 崩溃；使用 `python -X utf8 scripts/check_limits.py` 后发现 `backend/app/services/inspiration_service.py` 行数为 1008，超过 1000 行限制。
+  - 使用 Chrome DevTools MCP 对 `http://localhost:7778/` 做真实联调，验证视频转写链路、风格抽屉、思考气泡与页面网络请求。
+- Findings:
+  - `frontend/src/components/StyleManagementDrawer.tsx` 仍展示“系统风格 / 全局风格”，与产品要求冲突。
+  - `frontend/src/components/GeneratePanel.tsx` 与 `frontend/src/components/ResultPanel.tsx` 同时轮询 `pollJobStatus`，存在重复请求风险。
+  - `frontend/src/store.ts` 中 `syncLatestJob` 无论是否同一 job 都会清空 `latestResult/latestStages/latestAssetBreakdown`，高概率导致右侧闪烁。
+  - `scripts/check_limits.py` 在 Windows 默认编码下不可用，门禁脚本本身存在兼容性 bug。
+  - `backend/app/services/inspiration_service.py` 当前 1008 行，违反项目硬约束。
+## Session: 2026-03-09 全链路 Agent 审查
+
+### Phase: 审查、修复与复验
+- **Status:** in_progress
+- Actions taken:
+  - 运行 `pytest backend/tests -q`、`cd frontend && npm run lint`、`cd frontend && npm run build`。
+  - 使用 Chrome DevTools MCP 真实上传本地视频，复现并确认两个高置信问题：
+    - 转写阶段 `GET /api/v1/inspirations/{session_id}` 持续轮询且会堆积 pending；
+    - UI 会展示内部 reasoning / 工具过程文案。
+  - 已修复前端轮询停止条件、后台请求串行保护、思考展示净化、表单无障碍标签。
+  - 再次通过浏览器真实回归确认：内部推理不再外露，进入“确认生成张数”后请求数停止增长。
+- Files modified:
+  - `frontend/src/components/InspirationPanel.tsx`
+  - `frontend/src/components/ThinkingBubble.tsx`
+  - `frontend/src/components/ChatInput.tsx`
+  - `frontend/src/components/SessionPanel.tsx`

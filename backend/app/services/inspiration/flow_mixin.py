@@ -6,6 +6,7 @@ from backend.app.core.errors import DomainError
 from backend.app.core.utils import new_id, now_iso
 from backend.app.services.inspiration.allocation_builder_mixin import InspirationAllocationBuilderMixin
 from backend.app.services.inspiration.asset_extraction_mixin import InspirationAssetExtractionMixin
+from backend.app.services.inspiration.content_recommendation_mixin import InspirationContentRecommendationMixin
 from backend.app.services.inspiration.constants import (
     VISION_ERROR_MESSAGE,
     WELCOME_MESSAGE,
@@ -14,10 +15,23 @@ from backend.app.services.inspiration.style_save_mixin import InspirationStyleSa
 
 
 class InspirationFlowMixin(
+    InspirationContentRecommendationMixin,
     InspirationAssetExtractionMixin,
     InspirationAllocationBuilderMixin,
     InspirationStyleSaveMixin,
 ):
+    def _get_latest_assistant_turn_context(self, session_id: str) -> dict[str, Any]:
+        messages = self.inspiration_repo.list_messages(session_id)
+        for message in reversed(messages):
+            if message.get("role") != "assistant":
+                continue
+            reply = str(message.get("content") or "").strip().replace("\n", " ")
+            if len(reply) > 180:
+                reply = f"{reply[:180]}..."
+            options = message.get("options") if isinstance(message.get("options"), dict) else None
+            return {"reply": reply, "options": options, "stage": str(message.get("stage") or "").strip() or None}
+        return {"reply": "", "options": None, "stage": None}
+
     def _collect_recent_user_context(self, session_id: str, limit: int) -> str:
         messages = self.inspiration_repo.list_messages(session_id)
         if not messages:
@@ -158,9 +172,10 @@ class InspirationFlowMixin(
             }
         )
 
-    def _ingest_ready_transcripts(self, session_id: str, state: dict[str, Any]) -> None:
+    def _ingest_ready_transcripts(self, session_id: str, state: dict[str, Any]) -> list[dict[str, Any]]:
         seen_ids = set(state.get("transcript_seen_ids") or [])
         changed = False
+        new_transcripts: list[dict[str, Any]] = []
         for asset in self.asset_repo.list_by_session(session_id):
             if asset.get("asset_type") != "transcript" or asset.get("status") != "ready":
                 continue
@@ -169,6 +184,7 @@ class InspirationFlowMixin(
                 continue
             changed = True
             seen_ids.add(transcript_id)
+            new_transcripts.append(asset)
             self._append_message(
                 session_id=session_id,
                 role="user",
@@ -190,6 +206,33 @@ class InspirationFlowMixin(
             state["transcript_seen_ids"] = sorted(seen_ids)
             state["updated_at"] = now_iso()
             self.inspiration_repo.upsert_state(state)
+        return new_transcripts
+
+    def _should_autorun_from_transcripts(self, transcripts: list[dict[str, Any]]) -> bool:
+        for asset in transcripts:
+            content = str(asset.get("content") or "").strip()
+            if not content:
+                continue
+            if content.startswith("视频已上传，暂未获取到可用转写内容"):
+                continue
+            if content.startswith("已完成视频转写："):
+                continue
+            return True
+        return False
+
+    def _build_video_transcribing_turn(self) -> dict[str, Any]:
+        return {
+            "reply": "视频已收到，我先帮你转写里面的语音内容。转写完成后，我会自动继续整理里面提到的城市、景点和美食；如果你已经有明确方向，也可以现在直接补充给我。",
+            "stage": "transcribing_video",
+            "locked": False,
+            "progress": 12,
+            "progress_label": "视频转写中",
+            "options": {"items": [
+                {"label": "我先补充想做的城市和主题", "action_hint": "provide_city_theme_assets"},
+                {"label": "等视频转写完成后继续", "action_hint": "wait_for_transcript"}
+            ]},
+            "trace": [],
+        }
 
     def _normalize_selected_items(self, selected_items: list[str]) -> list[str]:
         normalized: list[str] = []

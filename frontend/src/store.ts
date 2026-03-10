@@ -1,6 +1,9 @@
 import { create } from 'zustand';
 import * as api from './api';
 
+let activeJobPollPromise: Promise<void> | null = null;
+let activeJobPollJobId: string | null = null;
+
 export interface ToastMessage {
   id: string;
   type: 'success' | 'error' | 'info';
@@ -209,23 +212,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     const pollingSessionId = latestJob.session_id;
     if (activeSessionId && pollingSessionId && activeSessionId !== pollingSessionId) return;
 
-    try {
-      const job = await api.getGenerationJob(pollingJobId);
-      const current = get();
-      if (current.activeSessionId !== pollingSessionId) return;
-      if (current.latestJob?.id !== pollingJobId) return;
-      set({ latestJob: job });
+    if (activeJobPollPromise && activeJobPollJobId === pollingJobId) {
+      return activeJobPollPromise;
+    }
 
-      get().fetchStages();
-      get().fetchAssetBreakdown();
+    const run = (async () => {
+      try {
+        const job = await api.getGenerationJob(pollingJobId);
+        const current = get();
+        if (current.activeSessionId !== pollingSessionId) return;
+        if (current.latestJob?.id !== pollingJobId) return;
+        set({ latestJob: job });
 
-      if (job.status === 'success' || job.status === 'partial_success' || job.status === 'failed') {
-        if (job.status === 'success' || job.status === 'partial_success') {
-          get().fetchResult();
+        get().fetchStages();
+        get().fetchAssetBreakdown();
+
+        if (job.status === 'success' || job.status === 'partial_success' || job.status === 'failed') {
+          if (job.status === 'success' || job.status === 'partial_success') {
+            get().fetchResult();
+          }
         }
+      } catch (e) {
+        console.error(e);
       }
-    } catch (e) {
-      console.error(e);
+    })();
+
+    activeJobPollPromise = run;
+    activeJobPollJobId = pollingJobId;
+
+    try {
+      await run;
+    } finally {
+      if (activeJobPollPromise === run) {
+        activeJobPollPromise = null;
+        activeJobPollJobId = null;
+      }
     }
   },
 
@@ -286,13 +307,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     try {
       const job = await api.getGenerationJob(jobId);
-      if (get().activeSessionId !== job.session_id) return;
-      set({ latestJob: job, latestResult: null, latestStages: [], latestAssetBreakdown: null });
+      const current = get();
+      if (current.activeSessionId !== job.session_id) return;
+      const isSameJob = current.latestJob?.id === job.id;
+      set({
+        latestJob: job,
+        latestResult: isSameJob ? current.latestResult : null,
+        latestStages: isSameJob ? current.latestStages : [],
+        latestAssetBreakdown: isSameJob ? current.latestAssetBreakdown : null,
+      });
       get().fetchStages();
       get().fetchAssetBreakdown();
       if (job.status === 'success' || job.status === 'partial_success') {
         get().fetchResult();
-      } else if (job.status === 'queued' || job.status === 'running') {
+      } else if (!isSameJob && (job.status === 'queued' || job.status === 'running')) {
         get().pollJobStatus();
       }
     } catch (e) {

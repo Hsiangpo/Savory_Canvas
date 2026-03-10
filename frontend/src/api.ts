@@ -316,6 +316,7 @@ export interface ModelReference {
 export interface ModelRoutingConfig {
   image_model: ModelReference;
   text_model: ModelReference;
+  transcript_model: ModelReference;
 }
 
 // --- API Calls ---
@@ -381,7 +382,8 @@ export const postInspirationMessageStream = async (
     images?: File[],
     videos?: File[]
   },
-  onEvent: (event: StreamEvent) => void
+  onEvent: (event: StreamEvent) => void,
+  signal?: AbortSignal,
 ) => {
   const formData = new FormData();
   formData.append('session_id', data.session_id);
@@ -400,6 +402,7 @@ export const postInspirationMessageStream = async (
   const response = await fetch(`${API_BASE_URL}/inspirations/messages/stream`, {
     method: 'POST',
     body: formData,
+    signal,
   });
 
   if (!response.ok) {
@@ -476,6 +479,7 @@ export const cancelGenerationJob = (jobId: string) => api.post(`/jobs/${jobId}/c
 export interface ModelRoutingConfigRequest {
   image_model: ModelReference;
   text_model: ModelReference;
+  transcript_model: ModelReference;
 }
 
 export const getProviders = () => api.get<{items: Provider[]}>('/providers').then(res => res.data);

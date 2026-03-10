@@ -179,13 +179,6 @@ h6 {
 }
 
 /* Right panel section sizing */
-.right-panel-progress {
-  padding: 16px;
-  flex: 0 0 auto;
-  max-height: 32vh;
-  overflow-y: auto;
-}
-
 .right-panel-result {
   flex: 1 1 0;
   min-height: 460px;
@@ -389,9 +382,6 @@ h6 {
 @media (max-width: 1200px) {
   .layout-right {
     flex: 0 0 420px;
-  }
-  .right-panel-progress {
-    max-height: 30vh;
   }
   .right-panel-result {
     min-height: 400px;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -110,6 +111,7 @@ def test_generation_copy_prefers_model_output_when_available_with_real_copy_mode
         json={
             "image_model": {"provider_id": provider["id"], "model_name": "gpt-image-1"},
             "text_model": {"provider_id": provider["id"], "model_name": "gpt-4.1-mini"},
+            "transcript_model": {"provider_id": provider["id"], "model_name": "whisper-large-v3-turbo"},
         },
     )
     assert routing_response.status_code == 200
@@ -142,7 +144,7 @@ def test_generation_copy_prefers_model_output_when_available_with_real_copy_mode
             return False
 
     def fake_urlopen(upstream_request, timeout=30):
-        assert timeout in {30, 45}
+        assert timeout in {30, 45, 90}
         if upstream_request.full_url.endswith("/responses"):
             request_body = upstream_request.data.decode("utf-8") if upstream_request.data else ""
             if "资产提取助手" in request_body:
@@ -351,6 +353,50 @@ def test_build_image_generation_payload_uses_large_size_for_seedream(client):
 
 
 @pytest.mark.image_pipeline_real
+def test_generate_images_degrades_reference_chain_after_retries(client, monkeypatch):
+    worker = client.app.state.services.generation.worker
+    saved_files: list[str] = []
+
+    monkeypatch.setattr(worker, "_collect_style_reference_paths", lambda **_: ["https://example.com/style-ref.png"])
+    monkeypatch.setattr(worker, "_is_canceled", lambda _job_id: False)
+    monkeypatch.setattr(worker, "_advance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker.storage, "save_generated_image", lambda filename, content: saved_files.append(filename))
+    monkeypatch.setattr(worker.result_repo, "add_image", lambda result: result)
+
+    attempts: list[list[str]] = []
+
+    from backend.app.core.errors import DomainError
+
+    def fake_generate_image_binary(*, image_provider, provider_id, model_name, prompt, reference_image_paths=None):
+        refs = list(reference_image_paths or [])
+        attempts.append(refs)
+        if refs:
+            raise DomainError(code="E-1004", message="图片生成失败：上游网络异常（上游：Remote end closed connection without response）", status_code=400)
+        return base64.b64decode(PNG_BASE64), "png"
+
+    monkeypatch.setattr(worker, "_generate_image_binary", fake_generate_image_binary)
+
+    created_images, failed_images, last_error = asyncio.run(
+        worker._generate_images(
+            job={"id": "job-reference-fallback", "session_id": "session-reference-fallback"},
+            prompt_specs=[{"prompt_text": "请生成一张示例图", "asset_refs": ["asset-1"]}],
+            source_assets=[],
+            style={"style_payload": {}},
+            image_provider={"id": "provider-1", "base_url": "https://example.com/v1", "api_key": "secret"},
+            image_model_name="gpt-image-1",
+            allow_image_reference=True,
+        )
+    )
+
+    assert failed_images == 0
+    assert last_error is not None
+    assert len(created_images) == 1
+    assert attempts[0] == ["https://example.com/style-ref.png"]
+    assert attempts[-1] == []
+    assert saved_files == ["job-reference-fallback_1.png"]
+
+
+@pytest.mark.image_pipeline_real
 def test_generate_image_binary_retries_with_larger_size_when_upstream_requires_min_pixels(client, monkeypatch):
     worker = client.app.state.services.generation.worker
     worker_module = _import_generation_worker_module()
@@ -480,7 +526,7 @@ def test_collect_style_reference_paths_only_uses_style_reference_sources(client)
     assert file_path_b not in refs
 
 
-def test_generation_copy_failure_keeps_partial_images(client, monkeypatch):
+def test_generation_copy_failure_uses_fallback_copy(client, monkeypatch):
     setup_model_routing(client)
     session = create_session(client, title="文案失败保留图片", content_mode="food")
     asset_response = client.post(
@@ -504,15 +550,16 @@ def test_generation_copy_failure_keeps_partial_images(client, monkeypatch):
 
     job = create_generation_job(client, session["id"], style["id"], image_count=1)
     ended = wait_for_job_end(client, job["id"])
-    assert ended["status"] == "partial_success"
-    assert ended["error_code"] == "E-1004"
-    assert "文案生成失败" in (ended.get("error_message") or "")
+    assert ended["status"] == "success"
+    assert ended.get("error_code") in (None, "")
 
     result_response = client.get(f"/api/v1/jobs/{job['id']}/results")
     assert result_response.status_code == 200
     payload = result_response.json()
     assert payload["images"]
-    assert payload["copy"]["title"] == ""
+    assert payload["copy"]["title"]
+    assert payload["copy"]["full_text"]
+    assert len(payload["copy"]["guide_sections"]) >= 3
 
 
 def test_generation_copy_result_retries_with_strict_json_prompt(client, monkeypatch):
@@ -599,7 +646,7 @@ def test_copy_text_model_retries_base_model_when_thinking_variant_conflicts(clie
             return False
 
     def fake_urlopen(upstream_request, timeout=45):
-        assert timeout == 45
+        assert timeout in {45, 90}
         payload = json.loads((upstream_request.data or b"{}").decode("utf-8", errors="ignore"))
         model = str(payload.get("model") or "")
         called_models.append(model)
@@ -628,3 +675,39 @@ def test_copy_text_model_retries_base_model_when_thinking_variant_conflicts(clie
     )
     assert content == "文案生成成功"
     assert called_models == ["gemini-3-pro-preview-thinking-low", "gemini-3-pro-preview"]
+
+
+def test_generation_copy_failure_falls_back_to_template(client, monkeypatch):
+    setup_model_routing(client)
+    session = create_session(client, title="文案兜底成功", content_mode="food_scenic")
+    asset_response = client.post(
+        "/api/v1/assets/text",
+        json={
+            "session_id": session["id"],
+            "asset_type": "text",
+            "content": "西安老菜场、中流巷、书院门、德福巷四个地点的城市漫游攻略",
+        },
+    )
+    assert asset_response.status_code == 201
+    style = create_style(client, session["id"], {"painting_style": ["手绘插画"]})
+
+    worker = client.app.state.services.generation.worker
+    worker_module = _import_generation_worker_module()
+
+    def fake_generate_copy_result(*args, **kwargs):
+        raise worker_module.DomainError(code="E-1004", message="文案生成失败：上游 502", status_code=503)
+
+    monkeypatch.setattr(worker, "_generate_copy_result", fake_generate_copy_result)
+
+    job = create_generation_job(client, session["id"], style["id"], image_count=1)
+    ended = wait_for_job_end(client, job["id"])
+    assert ended["status"] == "success"
+    assert ended.get("error_code") in (None, "")
+
+    result_response = client.get(f"/api/v1/jobs/{job['id']}/results")
+    assert result_response.status_code == 200
+    payload = result_response.json()
+    assert payload["images"]
+    assert payload["copy"]["title"]
+    assert payload["copy"]["full_text"]
+    assert len(payload["copy"]["guide_sections"]) >= 3

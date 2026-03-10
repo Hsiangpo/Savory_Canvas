@@ -391,7 +391,7 @@ class StyleModelCallerMixin:
             normalized.append(text)
         return normalized
 
-    def build_user_facing_upstream_message(self, error: StyleFallbackError) -> str:
+    def build_user_facing_upstream_message(self, error: StyleFallbackError, *, include_detail: bool = True) -> str:
         reason = str(error.reason or "").strip()
         detail = self._normalize_upstream_error_detail(error.detail)
         lowered_detail = detail.lower()
@@ -424,7 +424,7 @@ class StyleModelCallerMixin:
             base = "模型服务连接失败，请稍后重试"
         else:
             base = "模型服务连接失败，请稍后重试"
-        if detail:
+        if include_detail and detail:
             return f"{base}（上游：{detail}）"
         return base
 

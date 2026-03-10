@@ -18,6 +18,9 @@ from backend.app.workers.generation.text_model_retry import build_text_model_nam
 logger = logging.getLogger(__name__)
 
 
+COPY_UPSTREAM_TIMEOUT_SECONDS = 90
+
+
 class CopyModelError(Exception):
     def __init__(self, reason: str, detail: str | None = None):
         super().__init__(detail or reason)
@@ -257,7 +260,7 @@ class GenerationCopyGenerationMixin:
         model_name: str,
     ) -> dict[str, Any]:
         try:
-            return post_json(endpoint, payload, api_key, timeout=45)
+            return post_json(endpoint, payload, api_key, timeout=COPY_UPSTREAM_TIMEOUT_SECONDS)
         except HttpClientHttpError as error:
             if error.status_code in {404, 405}:
                 raise CopyModelError("protocol_endpoint_not_supported", f"HTTP {error.status_code}") from error
@@ -354,6 +357,71 @@ class GenerationCopyGenerationMixin:
         if not isinstance(payload, dict):
             raise ValueError("文案输出 JSON 结构非法")
         return payload
+
+    def _build_fallback_copy_payload(
+        self,
+        *,
+        job: dict[str, Any],
+        style: dict[str, Any],
+        images: list[dict[str, Any]],
+        content_mode: str,
+        breakdown: dict[str, Any],
+        error_message: str,
+    ) -> dict[str, Any]:
+        extracted = breakdown.get("extracted") or {}
+        foods = [str(item).strip() for item in extracted.get("foods") or [] if str(item).strip()]
+        scenes = [str(item).strip() for item in extracted.get("scenes") or [] if str(item).strip()]
+        keywords = [str(item).strip() for item in extracted.get("keywords") or [] if str(item).strip()]
+        title_focus = "、".join((scenes or foods or keywords)[:3]) or "本次灵感"
+        mode_label = {
+            "food": "美食",
+            "scenic": "景点",
+            "food_scenic": "城市漫游",
+        }.get(content_mode, "图文")
+        style_payload = style.get("style_payload") if isinstance(style.get("style_payload"), dict) else {}
+        painting_style = str(style_payload.get("painting_style") or "当前风格").strip()
+        color_mood = str(style_payload.get("color_mood") or "统一氛围").strip()
+        image_lines: list[str] = []
+        for index, image in enumerate(images, start=1):
+            prompt_text = str(image.get("prompt_text") or "").strip()
+            image_lines.append(f"第{index}张：{prompt_text[:90]}" if prompt_text else f"第{index}张：围绕已确认内容继续展开。")
+        if not image_lines:
+            image_lines.append("第1张：围绕已确认内容继续展开。")
+        sections = [
+            {
+                "heading": "看点概览",
+                "content": f"这次内容围绕{title_focus}展开，整体采用{painting_style}表现，氛围上保持{color_mood}，适合做成一组有路线感的{mode_label}图文。",
+            },
+            {
+                "heading": "出图安排",
+                "content": "；".join(image_lines),
+            },
+            {
+                "heading": "发布建议",
+                "content": "正文可以先抛出‘别只去热门点位’的反差，再按路线依次展开亮点，最后补充收藏/评论引导，提升互动和转化。",
+            },
+        ]
+        intro = f"这次已经把核心内容整理并完成出图，即使文案模型临时波动，也先给你一版可直接发布的备用文案，方便你继续推进。"
+        ending = "建议发布前再按你的口吻微调 1-2 句，结尾可以加上‘先收藏，来西安照着走’之类的行动引导。"
+        full_text = "\n".join(
+            [
+                f"{mode_label}攻略｜{title_focus}",
+                intro,
+                *[f"{item['heading']}：{item['content']}" for item in sections],
+                ending,
+                f"（系统已自动启用文案兜底，原因：{error_message}）",
+            ]
+        )
+        return {
+            "id": new_id(),
+            "job_id": job["id"],
+            "title": f"{mode_label}攻略｜{title_focus}",
+            "intro": intro,
+            "guide_sections": sections,
+            "ending": ending,
+            "full_text": full_text,
+            "created_at": now_iso(),
+        }
 
     def _normalize_copy_payload(self, *, job: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         title = str(payload.get("title", "")).strip()

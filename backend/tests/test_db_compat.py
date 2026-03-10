@@ -93,3 +93,43 @@ def test_fetch_operations_reuse_same_thread_local_connection(tmp_path, monkeypat
     database.fetch_all("SELECT name FROM sqlite_master WHERE type = 'table'")
 
     assert len(created_connections) == 1
+
+
+
+def test_initialize_adds_missing_columns_for_legacy_model_routing_table(tmp_path):
+    db_path = tmp_path / "legacy-routing.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE provider_config (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              base_url TEXT NOT NULL,
+              api_key TEXT NOT NULL,
+              api_key_masked TEXT NOT NULL,
+              api_protocol TEXT NOT NULL,
+              enabled INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE model_routing_config (
+              id TEXT PRIMARY KEY,
+              image_model_provider_id TEXT NOT NULL,
+              image_model_name TEXT NOT NULL,
+              text_model_provider_id TEXT NOT NULL,
+              text_model_name TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+    migration_path = Path(__file__).resolve().parents[1] / "migrations" / "001_init.sql"
+    database = Database(db_path)
+    database.initialize(migration_path)
+
+    with database.transaction() as conn:
+        routing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(model_routing_config)").fetchall()}
+
+    assert "transcript_model_provider_id" in routing_columns
+    assert "transcript_model_name" in routing_columns

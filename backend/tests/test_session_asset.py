@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 from conftest import create_session, wait_until
 
@@ -63,8 +65,66 @@ def test_session_rename_and_delete_not_found(client):
     assert delete_resp.json()["code"] == "E-2001"
 
 
-def test_text_asset_and_video_transcript(client):
+def test_text_asset_and_video_transcript(client, monkeypatch):
+    from backend.app.services.model_service import ModelService
+    import backend.app.workers.transcript_worker as transcript_worker_module
+
     session = create_session(client)
+
+    def fake_runtime_models(_, provider_payload):
+        assert provider_payload["id"]
+        return [
+            {"id": "gpt-image-1", "name": "gpt-image-1", "capabilities": ["image_generation"]},
+            {"id": "gpt-4.1-mini", "name": "gpt-4.1-mini", "capabilities": ["text_generation"]},
+            {"id": "whisper-large-v3-turbo", "name": "whisper-large-v3-turbo", "capabilities": ["transcription"]},
+        ]
+
+    monkeypatch.setattr(ModelService, "fetch_provider_models", fake_runtime_models)
+    provider = client.post(
+        "/api/v1/providers",
+        json={
+            "name": "转写服务商",
+            "base_url": "https://example.com",
+            "api_key": "secret-key",
+            "api_protocol": "responses",
+        },
+    ).json()
+    routing_resp = client.post(
+        "/api/v1/config/model-routing",
+        json={
+            "image_model": {"provider_id": provider["id"], "model_name": "gpt-image-1"},
+            "text_model": {"provider_id": provider["id"], "model_name": "gpt-4.1-mini"},
+            "transcript_model": {"provider_id": provider["id"], "model_name": "whisper-large-v3-turbo"},
+        },
+    )
+    assert routing_resp.status_code == 200
+
+    class FakeResponse:
+        def __init__(self, payload: dict):
+            self._payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        def read(self):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(_request, timeout=180):
+        assert timeout >= 30
+        return FakeResponse(
+            {
+                "text": "苏州园林 桂花糕 评弹",
+                "segments": [
+                    {"start": 0.0, "end": 1.2, "text": "苏州园林"},
+                    {"start": 1.2, "end": 2.4, "text": "桂花糕 评弹"},
+                ],
+            }
+        )
+
+    monkeypatch.setattr(transcript_worker_module, "request", SimpleNamespace(urlopen=fake_urlopen), raising=False)
 
     text_resp = client.post(
         "/api/v1/assets/text",
@@ -78,8 +138,9 @@ def test_text_asset_and_video_transcript(client):
     text_asset = text_resp.json()
     assert text_asset["status"] == "ready"
 
+    fake_mp4 = b"\x00\x00\x00ftypmp42" + (b"a" * 2048)
     files = {
-        "file": ("demo.mp4", BytesIO(b"fake video bytes"), "video/mp4"),
+        "file": ("苏州园林与点心.mp4", BytesIO(fake_mp4), "video/mp4"),
     }
     form_data = {"session_id": session["id"]}
     video_resp = client.post("/api/v1/assets/video", data=form_data, files=files)
@@ -101,7 +162,11 @@ def test_text_asset_and_video_transcript(client):
     transcript = wait_until(_poll_transcript, timeout=5.0, interval=0.1)
     assert transcript is not None
     assert transcript["status"] == "ready"
-    assert isinstance(transcript.get("text", ""), str)
+    assert transcript.get("text", "") == "苏州园林 桂花糕 评弹"
+    assert transcript.get("segments", []) == [
+        {"start": 0.0, "end": 1.2, "text": "苏州园林"},
+        {"start": 1.2, "end": 2.4, "text": "桂花糕 评弹"},
+    ]
 
 
 def test_image_asset_upload(client):
@@ -147,3 +212,84 @@ def test_not_found_error_codes_for_session_and_asset(client):
     assert missing_asset.status_code == 404
     assert missing_asset.json()["code"] == "E-2002"
 
+
+
+
+def test_video_asset_requires_transcript_model_routing(client):
+    session = create_session(client, title="缺少转写配置")
+    files = {
+        "file": ("苏州园林与点心.mp4", BytesIO(b"\x00\x00\x00ftypmp42" + (b"a" * 2048)), "video/mp4"),
+    }
+
+    response = client.post("/api/v1/assets/video", data={"session_id": session["id"]}, files=files)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "E-1006"
+
+
+
+def test_transcript_request_body_uses_json_for_gpt_4o_mini_transcribe(client, tmp_path):
+    worker = client.app.state.services.transcript.worker
+    media_path = tmp_path / 'sample.mp4'
+    media_path.write_bytes(b'\x00\x00\x00ftypmp42' + (b'a' * 2048))
+
+    body, boundary = worker._build_transcription_body(
+        file_path=media_path,
+        model_name='gpt-4o-mini-transcribe',
+    )
+
+    body_text = body.decode('utf-8', errors='ignore')
+    assert boundary in body_text
+    assert 'name="response_format"' in body_text
+    assert '\r\njson\r\n' in body_text
+    assert 'timestamp_granularities[]' not in body_text
+
+
+def test_transcript_request_body_keeps_verbose_json_for_whisper_models(client, tmp_path):
+    worker = client.app.state.services.transcript.worker
+    media_path = tmp_path / 'sample.mp4'
+    media_path.write_bytes(b'\x00\x00\x00ftypmp42' + (b'a' * 2048))
+
+    body, _boundary = worker._build_transcription_body(
+        file_path=media_path,
+        model_name='whisper-large-v3-turbo',
+    )
+
+    body_text = body.decode('utf-8', errors='ignore')
+    assert 'name="response_format"' in body_text
+    assert '\r\nverbose_json\r\n' in body_text
+    assert 'timestamp_granularities[]' in body_text
+
+
+
+def test_transcript_request_body_adds_accuracy_prompt_for_gpt_models(client, tmp_path):
+    worker = client.app.state.services.transcript.worker
+    media_path = tmp_path / 'sample.mp4'
+    media_path.write_bytes(b'\x00\x00\x00\x18ftypmp42' + (b'a' * 2048))
+
+    body, _boundary = worker._build_transcription_body(
+        file_path=media_path,
+        model_name='gpt-4o-mini-transcribe',
+    )
+
+    body_text = body.decode('utf-8', errors='ignore')
+    assert 'name="prompt"' in body_text
+    assert '请使用简体中文准确转写' in body_text
+    assert 'name="temperature"' in body_text
+    assert '\r\n0\r\n' in body_text
+
+
+def test_transcript_request_body_adds_accuracy_prompt_for_whisper_models(client, tmp_path):
+    worker = client.app.state.services.transcript.worker
+    media_path = tmp_path / 'sample.mp4'
+    media_path.write_bytes(b'\x00\x00\x00\x18ftypmp42' + (b'a' * 2048))
+
+    body, _boundary = worker._build_transcription_body(
+        file_path=media_path,
+        model_name='whisper-large-v3-turbo',
+    )
+
+    body_text = body.decode('utf-8', errors='ignore')
+    assert 'name="prompt"' in body_text
+    assert '请使用简体中文准确转写' in body_text
+    assert 'name="temperature"' in body_text

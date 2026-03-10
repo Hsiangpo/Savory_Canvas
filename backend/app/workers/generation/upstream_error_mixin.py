@@ -12,6 +12,9 @@ from backend.app.infra.http_client import (
 )
 
 
+IMAGE_UPSTREAM_TIMEOUT_SECONDS = 90
+
+
 class GenerationUpstreamErrorMixin:
     def _post_json(
         self,
@@ -23,7 +26,7 @@ class GenerationUpstreamErrorMixin:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         try:
-            parsed = post_json(url, payload, api_key, timeout=45)
+            parsed = post_json(url, payload, api_key, timeout=IMAGE_UPSTREAM_TIMEOUT_SECONDS)
         except HttpClientHttpError as error:
             upstream_error_message = self._extract_error_message_from_raw_text(error.body_text)
             self._log_upstream_failure(

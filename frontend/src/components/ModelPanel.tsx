@@ -22,8 +22,13 @@ export default function ModelPanel({ onClose }: ModelPanelProps) {
   const [imageModelInput, setImageModelInput] = useState('');
   const [imageProviderId, setImageProviderId] = useState('');
 
+  const [transcriptModels, setTranscriptModels] = useState<api.ModelItem[]>([]);
+  const [transcriptModelInput, setTranscriptModelInput] = useState('');
+  const [transcriptProviderId, setTranscriptProviderId] = useState('');
+
   const [isFetchingTextModels, setIsFetchingTextModels] = useState(false);
   const [isFetchingImageModels, setIsFetchingImageModels] = useState(false);
+  const [isFetchingTranscriptModels, setIsFetchingTranscriptModels] = useState(false);
 
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [newProvider, setNewProvider] = useState({ name: '', base_url: '', api_key: '', api_protocol: 'responses' as 'responses' | 'chat_completions' });
@@ -77,6 +82,24 @@ export default function ModelPanel({ onClose }: ModelPanelProps) {
     setIsFetchingImageModels(false);
   };
 
+  const handleTranscriptProviderChange = async (providerId: string) => {
+    const prevModel = transcriptModelInput;
+    const prevModels = transcriptModels;
+    setTranscriptProviderId(providerId);
+    setTranscriptModels([]);
+    setTranscriptModelInput('');
+    setIsFetchingTranscriptModels(true);
+    const models = await fetchModelsSafe(providerId, 'transcription');
+    if (models.length > 0) {
+      setTranscriptModels(models);
+      setTranscriptModelInput(models[0].name);
+    } else {
+      setTranscriptModels(prevModels);
+      setTranscriptModelInput(prevModel);
+    }
+    setIsFetchingTranscriptModels(false);
+  };
+
   const fetchData = async () => {
     setIsLoading(true);
     try {
@@ -88,21 +111,27 @@ export default function ModelPanel({ onClose }: ModelPanelProps) {
       
       let initialTextProviderId = '';
       let initialImageProviderId = '';
+      let initialTranscriptProviderId = '';
       let initialTextModel = '';
       let initialImageModel = '';
+      let initialTranscriptModel = '';
 
       if (routingRes) {
         initialTextProviderId = routingRes.text_model.provider_id;
         initialTextModel = routingRes.text_model.model_name;
         initialImageProviderId = routingRes.image_model.provider_id;
         initialImageModel = routingRes.image_model.model_name;
+        initialTranscriptProviderId = routingRes.transcript_model.provider_id;
+        initialTranscriptModel = routingRes.transcript_model.model_name;
       } else if (provRes.items.length > 0) {
         initialTextProviderId = provRes.items[0].id;
         initialImageProviderId = provRes.items[0].id;
+        initialTranscriptProviderId = provRes.items[0].id;
       }
 
       setTextProviderId(initialTextProviderId);
       setImageProviderId(initialImageProviderId);
+      setTranscriptProviderId(initialTranscriptProviderId);
 
       if (initialTextProviderId) {
         setIsFetchingTextModels(true);
@@ -130,9 +159,23 @@ export default function ModelPanel({ onClose }: ModelPanelProps) {
         }
         setIsFetchingImageModels(false);
       }
+      if (initialTranscriptProviderId) {
+        setIsFetchingTranscriptModels(true);
+        const models = await fetchModelsSafe(initialTranscriptProviderId, 'transcription');
+        if (models.length > 0) {
+          setTranscriptModels(models);
+          if (!initialTranscriptModel) {
+            initialTranscriptModel = models[0].name;
+          }
+        } else if (initialTranscriptModel) {
+          setTranscriptModels([{ id: initialTranscriptModel, name: initialTranscriptModel, capabilities: ['transcription'] }]);
+        }
+        setIsFetchingTranscriptModels(false);
+      }
 
       setTextModelInput(initialTextModel);
       setImageModelInput(initialImageModel);
+      setTranscriptModelInput(initialTranscriptModel);
 
     } catch {
       addToast('加载模型配置失败', 'error');
@@ -192,19 +235,20 @@ export default function ModelPanel({ onClose }: ModelPanelProps) {
   };
 
   const handleSaveRouting = async () => {
-    if (!textProviderId || !imageProviderId || !textModelInput || !imageModelInput) {
+    if (!textProviderId || !imageProviderId || !transcriptProviderId || !textModelInput || !imageModelInput || !transcriptModelInput) {
       addToast('请完整填写路由配置', 'error');
       return;
     }
 
     if (!textModels.some(m => m.name === textModelInput) || !imageModels.some(m => m.name === imageModelInput)) {
-      addToast('请选择有效的模型', 'error');
+      addToast('请选择有效的文字或生图模型', 'error');
       return;
     }
     try {
       await api.updateModelRouting({
         image_model: { provider_id: imageProviderId, model_name: imageModelInput },
-        text_model: { provider_id: textProviderId, model_name: textModelInput }
+        text_model: { provider_id: textProviderId, model_name: textModelInput },
+        transcript_model: { provider_id: transcriptProviderId, model_name: transcriptModelInput }
       });
       addToast('路由配置已保存', 'success');
       onClose();
@@ -290,6 +334,35 @@ export default function ModelPanel({ onClose }: ModelPanelProps) {
                        <option value="" disabled>{isFetchingImageModels ? '加载中...' : (imageModels.length ? '选择模型...' : '暂无可用模型')}</option>
                        {imageModels.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
                     </select>
+                  </div>
+                </div>
+
+                <div className="input-group" style={{ marginTop: '16px' }}>
+                  <label className="input-label">🎙️ 转写模型 (Transcript Model)</label>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <select className="input" style={{ width: '40%' }} value={transcriptProviderId} onChange={e => handleTranscriptProviderChange(e.target.value)}>
+                      <option value="" disabled>选择提供商...</option>
+                      {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                    <div style={{ flex: 1 }}>
+                      <input
+                        className="input"
+                        style={{ width: '100%' }}
+                        name="transcript-model-input"
+                        autoComplete="off"
+                        spellCheck={false}
+                        list="transcript-model-suggestions"
+                        value={transcriptModelInput}
+                        onChange={e => setTranscriptModelInput(e.target.value)}
+                        placeholder={isFetchingTranscriptModels ? '转写模型加载中...' : (transcriptModels.length ? '可手填或选择建议模型' : '请输入转写模型名')}
+                      />
+                      <datalist id="transcript-model-suggestions">
+                        {transcriptModels.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                      </datalist>
+                    </div>
+                  </div>
+                  <div style={{ marginTop: '8px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                    支持手动填写转写模型名；建议优先使用 `whisper-large-v3-turbo` 或 `gpt-4o-transcribe`。
                   </div>
                 </div>
               </div>

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Palette, Wand2 } from 'lucide-react';
 import { useAppStore } from '../store';
 import * as api from '../api';
+import { getErrorMessage, cleanErrorMessage } from '../getErrorMessage';
 import { CandidateEditor } from './CandidateEditor';
 import { ChatInput, type PendingUploadFile } from './ChatInput';
 import { ChatMessageItem } from './ChatMessage';
@@ -12,6 +13,12 @@ interface SendDisplayOverride {
   content: string;
   attachments?: api.InspirationAttachment[];
 }
+
+const STEP_STREAM_CHUNK = 8;
+const STEP_STREAM_INTERVAL_MS = 12;
+const REPLY_STREAM_CHUNK = 10;
+const REPLY_STREAM_INTERVAL_MS = 10;
+const AUTO_SCROLL_THRESHOLD_PX = 120;
 
 function normalizeCandidates(input?: api.InspirationAssetCandidates | null): api.InspirationAssetCandidates | null {
   if (!input) return null;
@@ -45,11 +52,168 @@ function shouldUseCandidateRevision(actionHint: string | null | undefined): bool
   return normalized.includes('revise') || normalized.includes('adjust');
 }
 
+function isGenericThinkingMessage(message: string): boolean {
+  const normalized = message.trim();
+  return normalized === '正在思考...' || normalized === '正在组织下一步...';
+}
+
+function sanitizeLiveThinkingMessage(message: string): string {
+  const normalized = String(message || '').trim();
+  if (!normalized) return '正在组织下一步...';
+  if (isGenericThinkingMessage(normalized)) return normalized;
+  if (normalized.startsWith('正在')) return normalized;
+  return '正在组织下一步...';
+}
+
+function toThinkingTimestamp(createdAt?: string): number {
+  const value = Date.parse(createdAt || '');
+  return Number.isFinite(value) ? value : Date.now();
+}
+
+function buildThinkingStepsFromTrace(
+  agent: api.InspirationAgentMeta | null | undefined,
+  animated = false,
+): ThinkingStep[] {
+  if (!agent?.trace?.length) return [];
+  const steps: ThinkingStep[] = [];
+  for (const item of agent.trace) {
+    if (item.node !== 'tool_node') continue;
+    const message = String(item.summary || '').trim();
+    if (!message) continue;
+    steps.push({
+      id: `trace-${item.id}`,
+      type: 'tool_done',
+      message,
+      displayedMessage: animated ? '' : message,
+      toolName: item.tool_name || undefined,
+      timestamp: toThinkingTimestamp(item.created_at),
+    });
+  }
+  return steps;
+}
+
+function mergeThinkingSteps(existing: ThinkingStep[], incoming: ThinkingStep[]): ThinkingStep[] {
+  if (!incoming.length) return existing;
+  if (!existing.length) return incoming;
+  const signatures = new Set(existing.map((step) => step.type === 'thinking' ? `thinking|${step.message}` : `${step.type}|${step.toolName || ''}|${step.message}`));
+  const merged = [...existing];
+  for (const step of incoming) {
+    const signature = step.type === 'thinking' ? `thinking|${step.message}` : `${step.type}|${step.toolName || ''}|${step.message}`;
+    if (signatures.has(signature)) continue;
+    signatures.add(signature);
+    merged.push(step);
+  }
+  return merged.sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function isSameThinkingStep(left: ThinkingStep | null | undefined, right: ThinkingStep | null | undefined): boolean {
+  if (!left || !right) return false;
+  if (left.type === "thinking" && right.type === "thinking") {
+    return left.message === right.message;
+  }
+  return left.type === right.type && left.toolName === right.toolName && left.message === right.message;
+}
+
+function appendLiveThinkingStep(existing: ThinkingStep[], incoming: ThinkingStep): ThinkingStep[] {
+  if (!existing.length) return [incoming];
+  if (
+    incoming.type === 'thinking'
+    && existing.some((step) => step.type === 'thinking' && step.message === incoming.message)
+  ) {
+    return existing;
+  }
+  const latestStep = existing[existing.length - 1];
+  if (
+    incoming.type === 'thinking'
+    && !isGenericThinkingMessage(incoming.message)
+    && latestStep.type === 'thinking'
+    && isGenericThinkingMessage(latestStep.message)
+  ) {
+    const replaced = [...existing.slice(0, -1), incoming];
+    return isSameThinkingStep(replaced[replaced.length - 2], incoming) ? replaced.slice(0, -1) : replaced;
+  }
+  if (isSameThinkingStep(latestStep, incoming)) {
+    return existing;
+  }
+  return [...existing, incoming];
+}
+
+function isNearBottom(container: HTMLDivElement): boolean {
+  return container.scrollHeight - container.scrollTop - container.clientHeight <= AUTO_SCROLL_THRESHOLD_PX;
+}
+
+function getLatestAssistantMessage(messages: api.InspirationMessage[]): api.InspirationMessage | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'assistant') {
+      return messages[index];
+    }
+  }
+  return null;
+}
+
+function areMessagesEquivalent(left: api.InspirationMessage[], right: api.InspirationMessage[]): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const l = left[index];
+    const r = right[index];
+    if (l.id !== r.id || l.role !== r.role || l.content !== r.content || l.created_at !== r.created_at) return false;
+    const lAttachments = l.attachments || [];
+    const rAttachments = r.attachments || [];
+    if (lAttachments.length !== rAttachments.length) return false;
+    for (let attachmentIndex = 0; attachmentIndex < lAttachments.length; attachmentIndex += 1) {
+      const la = lAttachments[attachmentIndex];
+      const ra = rAttachments[attachmentIndex];
+      if (la.id !== ra.id || la.status !== ra.status || la.name !== ra.name || la.type !== ra.type) return false;
+    }
+  }
+  return true;
+}
+
+function finalizeThinkingSteps(steps: ThinkingStep[]): ThinkingStep[] {
+  return steps.map((step) => ({
+    ...step,
+    displayedMessage: step.message,
+  }));
+}
+
+function attachThinkingStepsToAssistantMessage(
+  previous: Record<string, ThinkingStep[]>,
+  messages: api.InspirationMessage[],
+  steps: ThinkingStep[],
+): Record<string, ThinkingStep[]> {
+  const assistantMessage = getLatestAssistantMessage(messages);
+  if (!assistantMessage || !steps.length) return previous;
+  return {
+    ...previous,
+    [assistantMessage.id]: mergeThinkingSteps(previous[assistantMessage.id] || [], finalizeThinkingSteps(steps)),
+  };
+}
+
+function createLiveThinkingStep(event: Extract<api.StreamEvent, { type: 'thinking' | 'tool_start' | 'tool_done' }>): ThinkingStep {
+  const message = event.type === 'thinking'
+    ? sanitizeLiveThinkingMessage(event.message)
+    : event.message;
+  return {
+    id: `${Date.now()}-${Math.random()}`,
+    type: event.type,
+    message,
+    displayedMessage: isGenericThinkingMessage(message) ? message : '',
+    toolName: 'tool_name' in event ? event.tool_name : undefined,
+    durationMs: 'duration_ms' in event ? event.duration_ms : undefined,
+    timestamp: Date.now(),
+  };
+}
+
 export default function InspirationPanel() {
   const { activeSessionId, addToast, draft, setDraft, syncLatestJob } = useAppStore();
   const [messages, setMessages] = useState<api.InspirationMessage[]>([]);
   const [agentMeta, setAgentMeta] = useState<api.InspirationAgentMeta | null>(null);
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
+  const [thinkingStepsByMessageId, setThinkingStepsByMessageId] = useState<Record<string, ThinkingStep[]>>({});
+  const [pendingAssistantReply, setPendingAssistantReply] = useState('');
+  const [pendingAssistantDisplayedReply, setPendingAssistantDisplayedReply] = useState('');
+  const [pendingConversationResponse, setPendingConversationResponse] = useState<api.InspirationConversationResponse | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [inputText, setInputText] = useState('');
@@ -64,7 +228,11 @@ export default function InspirationPanel() {
   const inputTextRef = useRef<HTMLTextAreaElement>(null);
   const sessionIdRef = useRef<string | null>(activeSessionId);
   const pendingFilesRef = useRef<PendingUploadFile[]>([]);
-  const lastMessageCountRef = useRef(0);
+  const shouldStickToBottomRef = useRef(true);
+  const skipNextMessageAutoScrollRef = useRef(false);
+  const isBackgroundFetchingRef = useRef(false);
+  const streamAbortControllerRef = useRef<AbortController | null>(null);
+  const isTurnBusy = isLoading || pendingConversationResponse !== null;
 
   const revokePreviewUrls = useCallback((items: PendingUploadFile[]) => {
     items.forEach((item) => {
@@ -82,29 +250,75 @@ export default function InspirationPanel() {
     setPreviewLoadFailed(false);
   }, []);
 
-  const fetchConversation = useCallback(async (sessionId: string) => {
-    setIsLoading(true);
+  const scrollChatToBottom = useCallback((force = false) => {
+    const container = chatRef.current;
+    if (!container) return;
+    if (!force && !shouldStickToBottomRef.current) return;
+    window.requestAnimationFrame(() => {
+      const latestContainer = chatRef.current;
+      if (!latestContainer) return;
+      latestContainer.scrollTop = latestContainer.scrollHeight;
+      shouldStickToBottomRef.current = true;
+    });
+  }, []);
+
+  const fetchConversation = useCallback(async (sessionId: string, options?: { background?: boolean }) => {
+    const background = options?.background === true;
+    if (background) {
+      if (isBackgroundFetchingRef.current) return;
+      isBackgroundFetchingRef.current = true;
+    }
+    if (!background) {
+      setIsLoading(true);
+    }
     try {
       const response = await api.getInspirationConversation(sessionId);
       if (sessionIdRef.current !== sessionId) return;
-      setMessages(response.messages || []);
+      const nextMessages = response.messages || [];
+      setMessages((previous) => {
+        if (areMessagesEquivalent(previous, nextMessages)) {
+          return previous;
+        }
+        if (background && !shouldStickToBottomRef.current) {
+          skipNextMessageAutoScrollRef.current = true;
+        }
+        return nextMessages;
+      });
       setDraft(response.draft || null);
       setAgentMeta(response.agent || null);
+      setThinkingStepsByMessageId((previous) =>
+        attachThinkingStepsToAssistantMessage(previous, nextMessages, buildThinkingStepsFromTrace(response.agent || null)),
+      );
       if (response.draft?.active_job_id) {
         void syncLatestJob(response.draft.active_job_id);
       }
     } catch {
       if (sessionIdRef.current !== sessionId) return;
-      setMessages([{ id: Date.now().toString(), role: 'system', content: '连接失败，请稍后重试。', created_at: new Date().toISOString() }]);
-      setAgentMeta(null);
+      if (!background) {
+        setMessages([{ id: Date.now().toString(), role: 'system', content: '连接失败，请稍后重试。', created_at: new Date().toISOString() }]);
+        setAgentMeta(null);
+      }
     } finally {
-      if (sessionIdRef.current === sessionId) setIsLoading(false);
+      if (background) {
+        isBackgroundFetchingRef.current = false;
+      }
+      if (!background && sessionIdRef.current === sessionId) setIsLoading(false);
     }
   }, [setDraft, syncLatestJob]);
+
+  const shouldPollTranscriptUpdates = useMemo(() => {
+    if (!activeSessionId || isTurnBusy) return false;
+    return draft?.stage === 'transcribing_video';
+  }, [activeSessionId, draft?.stage, isTurnBusy]);
 
   useEffect(() => {
     pendingFilesRef.current = pendingFiles;
   }, [pendingFiles]);
+
+  useEffect(() => () => {
+    streamAbortControllerRef.current?.abort();
+    streamAbortControllerRef.current = null;
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -122,10 +336,27 @@ export default function InspirationPanel() {
   }, [closeImagePreview, previewModal]);
 
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    if (isStreaming) {
+      timer = setTimeout(() => {
+        addToast('模型服务响应较慢，请稍候', 'info');
+      }, 15000);
+    }
+    return () => clearTimeout(timer);
+  }, [isStreaming, addToast]);
+
+  useEffect(() => {
     sessionIdRef.current = activeSessionId;
+    streamAbortControllerRef.current?.abort();
+    streamAbortControllerRef.current = null;
     setIsLoading(false);
     setIsStreaming(false);
     setThinkingSteps([]);
+    setThinkingStepsByMessageId({});
+    setPendingAssistantReply('');
+    setPendingAssistantDisplayedReply('');
+    setPendingConversationResponse(null);
+    isBackgroundFetchingRef.current = false;
     setMessages([]);
     setDraft(null);
     setAgentMeta(null);
@@ -142,24 +373,110 @@ export default function InspirationPanel() {
   }, [activeSessionId, closeImagePreview, fetchConversation, revokePreviewUrls, setDraft]);
 
   useEffect(() => {
+    if (!activeSessionId || !shouldPollTranscriptUpdates) return undefined;
+    const timer = window.setInterval(() => {
+      void fetchConversation(activeSessionId, { background: true });
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [activeSessionId, fetchConversation, shouldPollTranscriptUpdates]);
+
+  useEffect(() => {
     const container = chatRef.current;
     if (!container) return;
-    const previousCount = lastMessageCountRef.current;
-    const nextCount = messages.length;
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    const shouldStickToBottom = previousCount === 0 || distanceFromBottom < 80;
-    lastMessageCountRef.current = nextCount;
-    if (nextCount > previousCount && shouldStickToBottom) {
-      // 修复点：仅在新增消息且用户接近底部时自动滚动，避免阅读历史内容时被强制打断。
-      container.scrollTop = container.scrollHeight;
+    const updateStickiness = () => {
+      shouldStickToBottomRef.current = isNearBottom(container);
+    };
+    updateStickiness();
+    container.addEventListener('scroll', updateStickiness);
+    return () => container.removeEventListener('scroll', updateStickiness);
+  }, []);
+
+  useEffect(() => {
+    if (skipNextMessageAutoScrollRef.current) {
+      skipNextMessageAutoScrollRef.current = false;
+      return;
     }
-  }, [messages]);
+    scrollChatToBottom();
+  }, [messages, scrollChatToBottom]);
 
   useEffect(() => {
     const container = chatRef.current;
     if (!container || thinkingSteps.length === 0) return;
-    container.scrollTop = container.scrollHeight;
+    scrollChatToBottom();
+  }, [scrollChatToBottom, thinkingSteps]);
+
+  useEffect(() => {
+    if (!pendingAssistantDisplayedReply) return;
+    scrollChatToBottom();
+  }, [pendingAssistantDisplayedReply, scrollChatToBottom]);
+
+  useEffect(() => {
+    const currentStepIndex = thinkingSteps.findIndex(
+      (step) => (step.displayedMessage ?? '') !== step.message,
+    );
+    if (currentStepIndex === -1) return;
+    const timer = window.setInterval(() => {
+      setThinkingSteps((previous) => {
+        const target = previous[currentStepIndex];
+        if (!target) return previous;
+        const displayedMessage = target.displayedMessage ?? '';
+        if (displayedMessage === target.message) return previous;
+        const nextDisplayedMessage = target.message.slice(
+          0,
+          Math.min(target.message.length, displayedMessage.length + STEP_STREAM_CHUNK),
+        );
+        const next = [...previous];
+        next[currentStepIndex] = { ...target, displayedMessage: nextDisplayedMessage };
+        return next;
+      });
+    }, STEP_STREAM_INTERVAL_MS);
+    return () => window.clearInterval(timer);
   }, [thinkingSteps]);
+
+  useEffect(() => {
+    if (!pendingAssistantReply) return;
+    if (thinkingSteps.some((step) => (step.displayedMessage ?? '') !== step.message)) return;
+    if (pendingAssistantDisplayedReply === pendingAssistantReply) return;
+    const timer = window.setInterval(() => {
+      setPendingAssistantDisplayedReply((previous) =>
+        pendingAssistantReply.slice(0, Math.min(pendingAssistantReply.length, previous.length + REPLY_STREAM_CHUNK)),
+      );
+    }, REPLY_STREAM_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [pendingAssistantDisplayedReply, pendingAssistantReply, thinkingSteps]);
+
+  useEffect(() => {
+    if (!pendingConversationResponse) return;
+    if (thinkingSteps.some((step) => (step.displayedMessage ?? '') !== step.message)) return;
+    if (pendingAssistantDisplayedReply !== pendingAssistantReply) return;
+    setMessages(pendingConversationResponse.messages || []);
+    setDraft(pendingConversationResponse.draft || null);
+    setAgentMeta(pendingConversationResponse.agent || null);
+    const traceThinkingSteps = buildThinkingStepsFromTrace(pendingConversationResponse.agent || null).filter(
+      (step) => step.type === 'thinking',
+    );
+    setThinkingStepsByMessageId((previous) =>
+      attachThinkingStepsToAssistantMessage(
+        previous,
+        pendingConversationResponse.messages || [],
+        mergeThinkingSteps(thinkingSteps, traceThinkingSteps),
+      ),
+    );
+    if (pendingConversationResponse.draft?.active_job_id) {
+      void syncLatestJob(pendingConversationResponse.draft.active_job_id);
+    }
+    setThinkingSteps([]);
+    setPendingAssistantReply('');
+    setPendingAssistantDisplayedReply('');
+    setPendingConversationResponse(null);
+  }, [
+    pendingAssistantDisplayedReply,
+    pendingAssistantReply,
+    pendingConversationResponse,
+    setDraft,
+    syncLatestJob,
+    thinkingSteps,
+  ]);
 
   useEffect(() => {
     const element = inputTextRef.current;
@@ -208,7 +525,7 @@ export default function InspirationPanel() {
 
   const handleInputDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    if (isLoading || !!draft?.locked) return;
+    if (isTurnBusy || !!draft?.locked) return;
     setIsInputDragActive(true);
   };
 
@@ -220,7 +537,7 @@ export default function InspirationPanel() {
   const handleInputDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setIsInputDragActive(false);
-    if (isLoading || !!draft?.locked) return;
+    if (isTurnBusy || !!draft?.locked) return;
     appendPendingFiles(Array.from(event.dataTransfer.files || []));
   };
 
@@ -246,7 +563,7 @@ export default function InspirationPanel() {
     overrideText?: string,
     displayOverride?: SendDisplayOverride,
   ) => {
-    if (!activeSessionId || isLoading) return;
+    if (!activeSessionId || isTurnBusy) return;
 
     const text = (overrideText ?? inputText).trim();
     const selection = customSelection || [];
@@ -281,7 +598,13 @@ export default function InspirationPanel() {
     setIsLoading(true);
     setIsStreaming(true);
     setThinkingSteps([]);
+    setPendingAssistantReply('');
+    setPendingAssistantDisplayedReply('');
+    setPendingConversationResponse(null);
     const requestSessionId = activeSessionId;
+    const streamAbortController = new AbortController();
+    streamAbortControllerRef.current?.abort();
+    streamAbortControllerRef.current = streamAbortController;
 
     try {
       const requestPayload = {
@@ -297,51 +620,50 @@ export default function InspirationPanel() {
         if (sessionIdRef.current !== requestSessionId) return;
         
         if (event.type === 'thinking' || event.type === 'tool_start' || event.type === 'tool_done') {
-          setThinkingSteps((prev) => [
-            ...prev,
-            {
-              id: `${Date.now()}-${Math.random()}`,
-              type: event.type as 'thinking' | 'tool_start' | 'tool_done',
-              message: event.message,
-              toolName: 'tool_name' in event ? event.tool_name : undefined,
-              durationMs: 'duration_ms' in event ? event.duration_ms : undefined,
-              timestamp: Date.now(),
-            }
-          ]);
+          setThinkingSteps((previous) => {
+            const nextStep = createLiveThinkingStep(event);
+            return appendLiveThinkingStep(previous, nextStep);
+          });
           setTimeout(() => {
-            if (chatRef.current) {
-              chatRef.current.scrollTop = chatRef.current.scrollHeight;
-            }
+            scrollChatToBottom();
           }, 50);
         } else if (event.type === 'done') {
           const response = event.data;
-          setMessages(response.messages || []);
-          setDraft(response.draft || null);
-          setAgentMeta(response.agent || null);
-          if (response.draft?.active_job_id) {
-            void syncLatestJob(response.draft.active_job_id);
-          }
+          const latestAssistantMessage = getLatestAssistantMessage(response.messages || []);
+          setThinkingSteps((previous) =>
+            mergeThinkingSteps(previous, buildThinkingStepsFromTrace(response.agent || null, true)),
+          );
+          setPendingConversationResponse(response);
+          setPendingAssistantReply(latestAssistantMessage?.content || '');
+          setPendingAssistantDisplayedReply('');
         } else if (event.type === 'error') {
-          addToast(`Agent 错误: ${event.message}`, 'error');
+          addToast(cleanErrorMessage(event.message), 'error');
           fetchConversation(requestSessionId);
         }
-      });
+      }, streamAbortController.signal);
     } catch (error) {
       if (sessionIdRef.current !== requestSessionId) return;
+      const aborted = error instanceof DOMException
+        ? error.name === 'AbortError'
+        : (error as { name?: string }).name === 'AbortError';
+      if (aborted) return;
       console.warn('Stream failed or transport error:', error);
       const typedError = error as { response?: { data?: { code?: string } } };
       if (typedError.response?.data?.code === 'E-1010') {
         addToast('当前模型不支持图片解析，请切换为视觉模型后重试。', 'error');
       } else {
-        addToast('流式连接异常，已同步最新会话状态', 'error');
+        addToast(getErrorMessage(error), 'error');
       }
       fetchConversation(requestSessionId);
     } finally {
       revokePreviewUrls(pendingSnapshot);
+      if (streamAbortControllerRef.current === streamAbortController) {
+        streamAbortControllerRef.current = null;
+      }
       if (sessionIdRef.current === requestSessionId) {
         setIsLoading(false);
         setIsStreaming(false);
-        setThinkingSteps([]);
+        // 保留思考记录，便于用户回看刚刚的处理过程。
       }
     }
   };
@@ -364,61 +686,6 @@ export default function InspirationPanel() {
         )}
       </div>
 
-      {activeSessionId && draft?.stage && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px 20px', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-glass)', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <div style={{ color: 'var(--accent-color)', fontWeight: 600 }}>
-              当前 Agent 阶段：{agentMeta?.dynamic_stage_label || getProgressLabel(draft)}
-            </div>
-            {agentMeta?.dynamic_stage && (
-              <div style={{ color: 'var(--text-secondary)' }}>
-                ({agentMeta.dynamic_stage})
-              </div>
-            )}
-          </div>
-          {typeof draft.progress === 'number' ? (
-            <div style={{ display: 'grid', gap: '6px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                <span>{draft.progress_label || '创作进行中'}</span>
-                <span>{draft.progress}%</span>
-              </div>
-              <div style={{ height: '8px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
-                <div
-                  style={{
-                    width: `${Math.max(0, Math.min(100, draft.progress))}%`,
-                    height: '100%',
-                    borderRadius: '999px',
-                    background: 'linear-gradient(90deg, #f59e0b 0%, #ef4444 100%)',
-                    transition: 'width 220ms ease',
-                  }}
-                />
-              </div>
-            </div>
-          ) : null}
-          {agentMeta?.trace?.length ? (
-            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'grid', gap: '6px' }}>
-              <div style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Agent 工具链</div>
-              {agentMeta.trace.map((item) => (
-                <div
-                  key={item.id}
-                  style={{
-                    padding: '8px 10px',
-                    borderRadius: '8px',
-                    border: '1px solid var(--border-color)',
-                    background: 'rgba(255,255,255,0.03)',
-                  }}
-                >
-                  <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                    {item.node}
-                    {item.tool_name ? ` · ${item.tool_name}` : ''}
-                  </div>
-                  <div>{item.summary || item.decision || '无附加说明'}</div>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      )}
 
       {!activeSessionId ? (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
@@ -427,22 +694,44 @@ export default function InspirationPanel() {
       ) : (
         <div className="panel-content" style={{ display: 'flex', flexDirection: 'column', padding: '16px 20px 0 20px' }}>
           <div className="chat-container" style={{ flex: 1, overflowY: 'auto', paddingBottom: '16px', paddingRight: '12px' }} ref={chatRef}>
-            {messages.map((message, index) => (
-              <ChatMessageItem
-                key={`${message.id}-${index}`}
-                message={message}
-                onPreview={openImagePreview}
-              />
-            ))}
+            {messages.map((message, index) => {
+              const persistedThinkingSteps = message.role === 'assistant'
+                ? (thinkingStepsByMessageId[message.id] || [])
+                : [];
+              return (
+                <Fragment key={`${message.id}-${index}`}>
+                  {persistedThinkingSteps.length > 0 && (
+                    <ThinkingBubble steps={persistedThinkingSteps} isActive={false} />
+                  )}
+                  <ChatMessageItem
+                    message={message}
+                    onPreview={openImagePreview}
+                  />
+                </Fragment>
+              );
+            })}
 
-            {isLoading && !isStreaming && (
+            {isLoading && !isStreaming && messages.length === 0 && thinkingSteps.length === 0 && !pendingAssistantDisplayedReply && (
               <div className="chat-bubble bot">
-                <Loader2 size={16} className="animate-spin" /> Agent 正在思考...
+                <Loader2 size={16} className="animate-spin" /> Agent 正在准备会话内容...
               </div>
             )}
 
-            {isStreaming && (
-              <ThinkingBubble steps={thinkingSteps} isActive={true} />
+            {(isStreaming || thinkingSteps.length > 0) && (
+              <ThinkingBubble steps={thinkingSteps} isActive={isStreaming} />
+            )}
+
+            {pendingAssistantDisplayedReply && (
+              <ChatMessageItem
+                message={{
+                  id: 'pending-assistant',
+                  role: 'assistant',
+                  content: pendingAssistantDisplayedReply || '',
+                  attachments: [],
+                  created_at: new Date().toISOString(),
+                }}
+                onPreview={openImagePreview}
+              />
             )}
           </div>
 
@@ -461,13 +750,42 @@ export default function InspirationPanel() {
             />
           )}
 
+          {activeSessionId && draft?.stage && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px', marginBottom: '12px', padding: '10px 12px', border: '1px solid var(--border-color)', borderRadius: '10px', background: 'var(--bg-glass)', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <div style={{ color: 'var(--accent-color)', fontWeight: 600 }}>
+                  当前 Agent 阶段：{agentMeta?.dynamic_stage_label || getProgressLabel(draft)}
+                </div>
+              </div>
+              {typeof draft.progress === 'number' ? (
+                <div style={{ display: 'grid', gap: '6px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                    <span>{draft.progress_label || '创作进行中'}</span>
+                    <span>{draft.progress}%</span>
+                  </div>
+                  <div style={{ height: '8px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                    <div
+                      style={{
+                        width: `${Math.max(0, Math.min(100, draft.progress))}%`,
+                        height: '100%',
+                        borderRadius: '999px',
+                        background: 'linear-gradient(90deg, #f59e0b 0%, #ef4444 100%)',
+                        transition: 'width 220ms ease',
+                      }}
+                    />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )}
+
           <div style={{ marginTop: '8px', borderTop: '1px solid var(--border-color)', padding: '14px 0' }}>
             <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
               {currentOptions.map((option) => (
                 <button
                   key={`${option.action_hint || 'option'}-${option.label}`}
                   className="btn btn-secondary"
-                  disabled={isLoading}
+                  disabled={isTurnBusy}
                   onClick={() => handleAgentOptionClick(option)}
                 >
                   {option.label}
@@ -477,7 +795,7 @@ export default function InspirationPanel() {
 
             <ChatInput
               draftLocked={!!draft?.locked}
-              isLoading={isLoading}
+              isLoading={isTurnBusy}
               inputText={inputText}
               pendingFiles={pendingFiles}
               isInputDragActive={isInputDragActive}

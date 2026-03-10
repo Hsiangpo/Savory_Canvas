@@ -107,3 +107,4 @@ class ModelReference(BaseModel):
 class ModelRoutingUpdateRequest(BaseModel):
     image_model: ModelReference
     text_model: ModelReference
+    transcript_model: ModelReference

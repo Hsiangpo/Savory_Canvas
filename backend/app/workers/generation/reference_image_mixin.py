@@ -9,6 +9,9 @@ from backend.app.infra.http_client import HttpClientHttpError, HttpClientNetwork
 from backend.app.workers.generation.image_postprocess import postprocess_generated_image
 
 
+IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 90
+
+
 class GenerationReferenceImageMixin:
     def _build_image_generation_payload(
         self,
@@ -271,7 +274,7 @@ class GenerationReferenceImageMixin:
         endpoint: str,
     ) -> bytes:
         try:
-            return download_binary(endpoint, timeout=45)
+            return download_binary(endpoint, timeout=IMAGE_DOWNLOAD_TIMEOUT_SECONDS)
         except HttpClientHttpError as error:
             self._log_upstream_failure(
                 provider_id=provider_id,

@@ -44,6 +44,53 @@ def test_provider_model_routing_and_models(client):
     assert del_resp.status_code == 200
 
 
+
+
+def test_model_routing_supports_transcript_model(client, monkeypatch):
+    from backend.app.services.model_service import ModelService
+
+    provider = client.post(
+        "/api/v1/providers",
+        json={
+            "name": "转写模型提供商",
+            "base_url": "https://example.com",
+            "api_key": "transcript-key",
+            "api_protocol": "responses",
+        },
+    ).json()
+
+    def fake_runtime_models(_, provider_payload):
+        assert provider_payload["id"] == provider["id"]
+        return [
+            {"id": "gpt-image-1", "name": "gpt-image-1", "capabilities": ["image_generation"]},
+            {"id": "gpt-4.1-mini", "name": "gpt-4.1-mini", "capabilities": ["text_generation"]},
+            {"id": "whisper-large-v3-turbo", "name": "whisper-large-v3-turbo", "capabilities": ["transcription"]},
+        ]
+
+    monkeypatch.setattr(ModelService, "fetch_provider_models", fake_runtime_models)
+    response = client.post(
+        "/api/v1/config/model-routing",
+        json={
+            "image_model": {"provider_id": provider["id"], "model_name": "gpt-image-1"},
+            "text_model": {"provider_id": provider["id"], "model_name": "gpt-4.1-mini"},
+            "transcript_model": {"provider_id": provider["id"], "model_name": "whisper-large-v3-turbo"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["transcript_model"]["provider_id"] == provider["id"]
+    assert body["transcript_model"]["model_name"] == "whisper-large-v3-turbo"
+
+
+def test_infer_capabilities_supports_transcription_variants():
+    from backend.app.services.model_service import ModelService
+
+    service = ModelService(config_repo=None, provider_repo=None)  # type: ignore[arg-type]
+    for model_name in ["whisper-large-v3-turbo", "gpt-4o-transcribe", "distil-whisper-large-v3-en"]:
+        capabilities = service._infer_capabilities(model_name)
+        assert "transcription" in capabilities
+
 def test_provider_api_key_is_encrypted_at_rest_and_masked_to_last_four(client):
     create_response = client.post(
         "/api/v1/providers",
@@ -140,6 +187,10 @@ def test_model_routing_requires_capability_match(client):
                 "provider_id": provider["id"],
                 "model_name": "gpt-4.1",
             },
+            "transcript_model": {
+                "provider_id": provider["id"],
+                "model_name": "whisper-large-v3-turbo",
+            },
         },
     )
     assert wrong_image.status_code == 400
@@ -156,6 +207,10 @@ def test_model_routing_requires_capability_match(client):
             "text_model": {
                 "provider_id": provider["id"],
                 "model_name": "gpt-image-1",
+            },
+            "transcript_model": {
+                "provider_id": provider["id"],
+                "model_name": "whisper-large-v3-turbo",
             },
         },
     )

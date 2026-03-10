@@ -14,12 +14,13 @@ export default function SessionPanel() {
   const { sessionList, activeSessionId, setActiveSessionId, fetchSessions, createSession, renameSession, removeSession, addToast } = useAppStore();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('未命名会话');
-  const [newContentMode, setNewContentMode] = useState<api.Session['content_mode']>('food');
 
   const [dropdownState, setDropdownState] = useState<SessionDropdownState | null>(null);
   const [renameSessionObj, setRenameSessionObj] = useState<api.Session | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
   const [deleteSessionObj, setDeleteSessionObj] = useState<api.Session | null>(null);
+  const createTitleInputId = 'create-session-title-input';
+  const renameTitleInputId = 'rename-session-title-input';
 
   const openRename = (s: api.Session) => {
     setRenameSessionObj(s);
@@ -101,11 +102,9 @@ export default function SessionPanel() {
 
   const handleCreateConfirm = () => {
     if (newTitle.trim()) {
-      // 修复点：新建会话时不再硬编码 food，显式让用户选择内容模式。
-      createSession(newTitle, newContentMode);
+      createSession(newTitle, 'food_scenic');
       setShowCreateModal(false);
       setNewTitle('未命名会话');
-      setNewContentMode('food');
       addToast('会话已创建', 'success');
     }
   };
@@ -171,33 +170,22 @@ export default function SessionPanel() {
           <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ padding: '24px' }}>
             <h3 style={{ marginBottom: '16px' }}>新建会话</h3>
             <div className="input-group">
-              <label className="input-label">会话标题</label>
+              <label className="input-label" htmlFor={createTitleInputId}>会话标题</label>
               <input 
+                id={createTitleInputId}
                 autoFocus
                 className="input" 
+                name="create-session-title"
                 value={newTitle} 
                 onChange={(e) => setNewTitle(e.target.value)} 
                 placeholder="例如: 奶油草莓蛋糕设计" 
               />
-            </div>
-            <div className="input-group" style={{ marginTop: '12px' }}>
-              <label className="input-label">内容模式</label>
-              <select
-                className="input"
-                value={newContentMode}
-                onChange={(event) => setNewContentMode(event.target.value as api.Session['content_mode'])}
-              >
-                <option value="food">美食</option>
-                <option value="scenic">景点</option>
-                <option value="food_scenic">美食 + 景点</option>
-              </select>
             </div>
             <div style={{ marginTop: '24px', display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
               <button
                 className="btn btn-ghost"
                 onClick={() => {
                   setShowCreateModal(false);
-                  setNewContentMode('food');
                 }}
               >
                 取消
@@ -215,10 +203,12 @@ export default function SessionPanel() {
           <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ padding: '24px' }}>
             <h3 style={{ marginBottom: '16px' }}>重命名会话</h3>
             <div className="input-group">
-              <label className="input-label">新标题</label>
+              <label className="input-label" htmlFor={renameTitleInputId}>新标题</label>
               <input 
+                id={renameTitleInputId}
                 autoFocus
                 className="input" 
+                name="rename-session-title"
                 value={renameTitle} 
                 onChange={(e) => setRenameTitle(e.target.value)} 
                 placeholder="输入新标题" 

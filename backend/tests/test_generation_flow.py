@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from conftest import create_generation_job, create_session, create_style, setup_model_routing, wait_for_job_end
+from conftest import create_generation_job, create_session, create_style, setup_model_routing, wait_for_job_end, wait_until
 
 PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6p9x8AAAAASUVORK5CYII="
 
@@ -38,7 +38,8 @@ def test_generation_result_returns_accessible_image_url_and_asset_refs(client):
 
     style = create_style(client, session["id"], {"painting_style": ["电影写实"], "color_mood": ["暖金氛围"]})
     job = create_generation_job(client, session["id"], style["id"], image_count=2)
-    ended = wait_for_job_end(client, job["id"])
+    ended = wait_until(lambda: (lambda response: response.json() if response.status_code == 200 and response.json()["status"] in {"success", "partial_success", "failed", "canceled"} else None)(client.get(f"/api/v1/jobs/{job["id"]}")), timeout=20.0, interval=0.1)
+    assert ended is not None
     assert ended["status"] in {"success", "partial_success"}
 
     result_response = client.get(f"/api/v1/jobs/{job['id']}/results")
@@ -73,7 +74,8 @@ def test_generation_stages_and_asset_breakdown_observable(client):
 
     style = create_style(client, session["id"], {"painting_style": ["油画厚涂"]})
     job = create_generation_job(client, session["id"], style["id"], image_count=1)
-    ended = wait_for_job_end(client, job["id"])
+    ended = wait_until(lambda: (lambda response: response.json() if response.status_code == 200 and response.json()["status"] in {"success", "partial_success", "failed", "canceled"} else None)(client.get(f"/api/v1/jobs/{job["id"]}")), timeout=20.0, interval=0.1)
+    assert ended is not None
     assert ended["status"] in {"success", "partial_success"}
 
     stages_response = client.get(f"/api/v1/jobs/{job['id']}/stages")
@@ -236,6 +238,10 @@ def _setup_routing_with_provider_base_url(client, base_url: str) -> dict:
                 "provider_id": provider_payload["id"],
                 "model_name": "gpt-4.1-mini",
             },
+            "transcript_model": {
+                "provider_id": provider_payload["id"],
+                "model_name": "whisper-large-v3-turbo",
+            },
         },
     )
     assert routing.status_code == 200
@@ -255,7 +261,8 @@ def _run_job_expect_e1004(client):
     assert asset_response.status_code == 201
     style = create_style(client, session["id"], {"painting_style": ["电影写实"]})
     job = create_generation_job(client, session["id"], style["id"], image_count=1)
-    ended = wait_for_job_end(client, job["id"])
+    ended = wait_until(lambda: (lambda response: response.json() if response.status_code == 200 and response.json()["status"] in {"success", "partial_success", "failed", "canceled"} else None)(client.get(f"/api/v1/jobs/{job["id"]}")), timeout=20.0, interval=0.1)
+    assert ended is not None
     assert ended["status"] == "failed"
     assert ended["error_code"] == "E-1004"
     return job["id"], ended

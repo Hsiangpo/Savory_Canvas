@@ -292,7 +292,7 @@ class ProviderListResponse(BaseModel):
 class ModelInfo(BaseModel):
     id: str
     name: str
-    capabilities: list[Literal["image_generation", "text_generation", "vision"]]
+    capabilities: list[Literal["image_generation", "text_generation", "vision", "transcription"]]
 
 
 class ModelListResponse(BaseModel):
@@ -308,6 +308,7 @@ class ModelReference(BaseModel):
 class ModelRoutingConfig(BaseModel):
     image_model: ModelReference
     text_model: ModelReference
+    transcript_model: ModelReference
     updated_at: str
 
 

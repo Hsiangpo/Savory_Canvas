@@ -21,15 +21,30 @@ from backend.app.services.asset_service import AssetService, TranscriptService
 from backend.app.services.model_service import ModelService
 from backend.app.services.style_service import StyleFallbackError, StyleService
 
-from backend.app.services.inspiration.constants import (
-    STYLE_PROMPT_RETRY_SYSTEM_PROMPT,
-    STYLE_PROMPT_SYSTEM_PROMPT,
-)
 from backend.app.services.inspiration.flow_mixin import InspirationFlowMixin
+from backend.app.services.inspiration.prompt_generation_mixin import InspirationPromptGenerationMixin
 logger = logging.getLogger(__name__)
 
 
-class InspirationService(InspirationFlowMixin):
+class InspirationService(InspirationPromptGenerationMixin, InspirationFlowMixin):
+    _IMAGE_COUNT_ACTION_PATTERN = re.compile(r"^(?:confirm|select|set)_image_count_(\d+)$")
+    _TEXTUAL_IMAGE_COUNT_PATTERN = re.compile(
+        r"(?<!第)(?:一共|总共|共|想做|想要|要做|做|要|生成|出|来|安排|需要)?\s*(10|[1-9]|[一二两三四五六七八九十])\s*张(?:图|图片|配图|海报|图文)?"
+    )
+    _CHINESE_IMAGE_COUNT_MAP = {
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+
     def __init__(
         self,
         inspiration_repo: InspirationRepository,
@@ -62,21 +77,78 @@ class InspirationService(InspirationFlowMixin):
         if not session:
             raise not_found("会话", session_id)
         state = self._ensure_state(session_id)
-        self._ingest_ready_transcripts(session_id, state)
+        new_transcripts = self._ingest_ready_transcripts(session_id, state)
         self._ensure_welcome_message(session_id, state)
+        transcript_text = "\n".join(
+            str(asset.get("content") or "").strip()
+            for asset in new_transcripts
+            if str(asset.get("content") or "").strip()
+        )
+        transcript_attachments = [
+            self._build_attachment(
+                str(asset.get("id") or ""),
+                "transcript",
+                "视频转写",
+                asset.get("file_path"),
+                "ready",
+            )
+            for asset in new_transcripts
+            if str(asset.get("id") or "").strip()
+        ]
+        state = self._backfill_asset_candidates_from_transcripts(
+            session_id=session_id,
+            state=state,
+            transcript_text=transcript_text,
+        )
+        if new_transcripts and self._should_autorun_from_transcripts(new_transcripts):
+            self._apply_agent_turn(
+                session_id=session_id,
+                state=state,
+                turn=self._run_agent_turn(
+                    session=session,
+                    state=state,
+                    text=transcript_text,
+                    selected_items=[],
+                    action="transcript_ready_auto",
+                    attachments=transcript_attachments,
+                ),
+            )
         return self._build_response(session_id, state)
 
-    async def send_message(
+    def _backfill_asset_candidates_from_transcripts(
         self,
         *,
         session_id: str,
-        text: str | None,
-        selected_items: list[str],
-        action: str | None,
-        image_usages: list[str],
-        images: list[UploadFile],
-        videos: list[UploadFile],
+        state: dict[str, Any],
+        transcript_text: str,
     ) -> dict[str, Any]:
+        existing_asset_candidates = state.get("asset_candidates")
+        if isinstance(existing_asset_candidates, dict) and existing_asset_candidates:
+            return state
+
+        should_backfill = str(state.get("stage") or "") == "count_confirmation_required"
+        if not transcript_text and should_backfill:
+            transcript_text = "\n".join(
+                str(asset.get("content") or "").strip()
+                for asset in self.asset_repo.list_by_session(session_id)
+                if asset.get("asset_type") == "transcript" and str(asset.get("content") or "").strip()
+            )
+        if not transcript_text:
+            return state
+
+        try:
+            state["asset_candidates"] = self.extract_assets(
+                session_id=session_id,
+                user_hint=transcript_text,
+                style_prompt=str(state.get("style_prompt") or ""),
+            )
+            state["updated_at"] = now_iso()
+            return self.inspiration_repo.upsert_state(state)
+        except (DomainError, StyleFallbackError):
+            logger.warning("转写资产候选补全失败，回退到常规 Agent 流程: session_id=%s", session_id)
+            return state
+
+    async def send_message(self, *, session_id: str, text: str | None, selected_items: list[str], action: str | None, image_usages: list[str], images: list[UploadFile], videos: list[UploadFile]) -> dict[str, Any]:
         prepared = await self._prepare_message_context(
             session_id=session_id,
             text=text,
@@ -86,6 +158,8 @@ class InspirationService(InspirationFlowMixin):
             images=images,
             videos=videos,
         )
+        if prepared.get("defer_for_transcript"):
+            self._apply_agent_turn(session_id=session_id, state=prepared["state"], turn=self._build_video_transcribing_turn()); return self._build_response(session_id, prepared["state"])
         agent_turn = self._run_agent_turn(
             session=prepared["session"],
             state=prepared["state"],
@@ -97,17 +171,7 @@ class InspirationService(InspirationFlowMixin):
         self._apply_agent_turn(session_id=session_id, state=prepared["state"], turn=agent_turn)
         return self._build_response(session_id, prepared["state"])
 
-    async def send_message_stream(
-        self,
-        *,
-        session_id: str,
-        text: str | None,
-        selected_items: list[str],
-        action: str | None,
-        image_usages: list[str],
-        images: list[UploadFile],
-        videos: list[UploadFile],
-    ) -> Iterator[str]:
+    async def send_message_stream(self, *, session_id: str, text: str | None, selected_items: list[str], action: str | None, image_usages: list[str], images: list[UploadFile], videos: list[UploadFile]) -> Iterator[str]:
         prepared = await self._prepare_message_context(
             session_id=session_id,
             text=text,
@@ -117,6 +181,9 @@ class InspirationService(InspirationFlowMixin):
             images=images,
             videos=videos,
         )
+        if prepared.get("defer_for_transcript"):
+            self._apply_agent_turn(session_id=session_id, state=prepared["state"], turn=self._build_video_transcribing_turn())
+            return iter([self._format_sse_event("done", self._build_response(session_id, prepared["state"]))])
         request_payload = self._build_agent_request_payload(
             session=prepared["session"],
             state=prepared["state"],
@@ -139,17 +206,12 @@ class InspirationService(InspirationFlowMixin):
                         yield self._format_sse_event("done", response)
                         return
                     if event_type == "error":
-                        payload = data if isinstance(data, dict) else {"code": "E-1099", "message": "Agent 执行异常"}
-                        if "code" not in payload:
-                            payload["code"] = "E-1099"
-                        if "message" not in payload:
-                            payload["message"] = "Agent 执行异常"
-                        yield self._format_sse_event("error", payload)
+                        yield self._format_sse_event("error", self._sanitize_stream_error_payload(data))
                         return
                     if event_type:
                         yield self._format_sse_event(event_type, data or {})
             except DomainError as exc:
-                yield self._format_sse_event("error", {"code": exc.code, "message": exc.message})
+                yield self._format_sse_event("error", self._sanitize_stream_error_payload({"code": exc.code, "message": exc.message}))
             except Exception:
                 logger.exception("灵感对话 SSE 流执行失败: session_id=%s", session_id)
                 yield self._format_sse_event("error", {"code": "E-1099", "message": "Agent 执行异常"})
@@ -178,17 +240,8 @@ class InspirationService(InspirationFlowMixin):
         )
         return self.creative_agent.respond(request_payload)
 
-    def _build_agent_request_payload(
-        self,
-        *,
-        session: dict[str, Any],
-        state: dict[str, Any],
-        text: str,
-        selected_items: list[str],
-        action: str | None,
-        attachments: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        selected_style_profile = self._resolve_selected_style_profile(action=action, selected_items=selected_items)
+    def _build_agent_request_payload(self, *, session: dict[str, Any], state: dict[str, Any], text: str, selected_items: list[str], action: str | None, attachments: list[dict[str, Any]]) -> dict[str, Any]:
+        selected_style_profile = self._resolve_selected_style_profile(action=action, selected_items=selected_items); latest_assistant_context = self._get_latest_assistant_turn_context(session["id"])
         return {
             "session_id": session["id"],
             "text": text,
@@ -197,8 +250,10 @@ class InspirationService(InspirationFlowMixin):
             "attachments": attachments,
             "content_mode": session.get("content_mode"),
             "selected_style_profile": selected_style_profile,
+            "latest_assistant_reply": latest_assistant_context.get("reply"), "latest_assistant_options": latest_assistant_context.get("options"), "latest_assistant_stage": latest_assistant_context.get("stage"),
             "state": {
                 "stage": state.get("stage", "initial_understanding"),
+                "style_stage": state.get("style_stage"),
                 "locked": bool(state.get("locked")),
                 "content_mode": session.get("content_mode"),
                 "style_payload": self._build_style_payload(state),
@@ -234,6 +289,8 @@ class InspirationService(InspirationFlowMixin):
             state["allocation_plan"] = turn_payload.get("allocation_plan") or []
         if "draft_style_id" in turn_payload and turn_payload.get("draft_style_id") is not None:
             state["draft_style_id"] = turn_payload.get("draft_style_id")
+        if "style_stage" in turn_payload and turn_payload.get("style_stage") is not None:
+            state["style_stage"] = str(turn_payload.get("style_stage") or "painting_style")
         if "requirement_ready" in turn_payload and turn_payload.get("requirement_ready") is not None:
             state["requirement_ready"] = bool(turn_payload.get("requirement_ready"))
         if "prompt_confirmable" in turn_payload and turn_payload.get("prompt_confirmable") is not None:
@@ -241,7 +298,12 @@ class InspirationService(InspirationFlowMixin):
         if "stage" in turn_payload and turn_payload.get("stage") is not None:
             state["stage"] = str(turn_payload.get("stage") or state.get("stage") or "initial_understanding")
         if "locked" in turn_payload and turn_payload.get("locked") is not None:
-            state["locked"] = bool(turn_payload["locked"])
+            state["locked"] = self._normalize_locked_state(
+                stage=str(state.get("stage") or turn_payload.get("stage") or ""),
+                requested_locked=bool(turn_payload["locked"]),
+                state=state,
+                turn_payload=turn_payload,
+            )
         if "progress" in turn_payload:
             state["progress"] = self._normalize_progress_value(turn_payload.get("progress"), fallback=state.get("progress"))
         if "progress_label" in turn_payload:
@@ -363,6 +425,13 @@ class InspirationService(InspirationFlowMixin):
         if not normalized_text and not normalized_items and not normalized_action and not images and not videos:
             raise DomainError(code="E-1099", message="请输入内容或选择选项", status_code=400)
 
+        self._apply_action_state_updates(
+            state=state,
+            action=normalized_action,
+            text=normalized_text,
+            selected_items=normalized_items,
+        )
+
         if images:
             self._ensure_vision_capable()
 
@@ -397,10 +466,124 @@ class InspirationService(InspirationFlowMixin):
             "normalized_items": normalized_items,
             "normalized_action": normalized_action,
             "attachments": attachments,
+            "defer_for_transcript": bool(videos and not normalized_text and not normalized_items and not images),
         }
 
     def _format_sse_event(self, event_type: str, data: Any) -> str:
         return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def _sanitize_stream_error_payload(self, data: Any) -> dict[str, Any]:
+        payload = data if isinstance(data, dict) else {}
+        code = str(payload.get("code") or "E-1099")
+        raw_message = str(payload.get("message") or "").strip()
+        cleaned_message = self._sanitize_stream_error_message(raw_message)
+        return {"code": code, "message": cleaned_message}
+
+    def _sanitize_stream_error_message(self, message: str) -> str:
+        normalized = " ".join(str(message or "").split())
+        lowered = normalized.lower()
+        if not normalized:
+            return "Agent 执行异常"
+        if any(marker in lowered for marker in ("<!doctype", "<html", "cloudflare", "bad gateway", "gateway", "502", "503", "504")):
+            return "模型服务暂时不可用，请稍后重试"
+        if len(normalized) > 240:
+            return "模型服务暂时不可用，请稍后重试"
+        return normalized
+
+    def _apply_action_state_updates(
+        self,
+        *,
+        state: dict[str, Any],
+        action: str | None,
+        text: str,
+        selected_items: list[str],
+    ) -> None:
+        image_count = self._extract_image_count_from_action(action)
+        if image_count is None:
+            image_count = self._extract_image_count_from_inputs(text=text, selected_items=selected_items)
+        if image_count is None:
+            return
+        state["image_count"] = image_count
+        if str(state.get("style_prompt") or "").strip():
+            state["prompt_confirmable"] = True
+        state["locked"] = False
+        state["updated_at"] = now_iso()
+        self.inspiration_repo.upsert_state(state)
+
+    def _extract_image_count_from_action(self, action: str | None) -> int | None:
+        if not action:
+            return None
+        matched = self._IMAGE_COUNT_ACTION_PATTERN.fullmatch(action)
+        if not matched:
+            return None
+        image_count = int(matched.group(1))
+        if not 1 <= image_count <= 10:
+            return None
+        return image_count
+
+    def _extract_image_count_from_inputs(self, *, text: str, selected_items: list[str]) -> int | None:
+        candidates = [text, *selected_items]
+        for candidate in candidates:
+            image_count = self._extract_image_count_from_text(candidate)
+            if image_count is not None:
+                return image_count
+        return None
+
+    def _extract_image_count_from_text(self, raw_text: str) -> int | None:
+        normalized = " ".join(str(raw_text or "").split())
+        if not normalized:
+            return None
+        matched = self._TEXTUAL_IMAGE_COUNT_PATTERN.search(normalized)
+        if not matched:
+            return None
+        return self._normalize_image_count_literal(matched.group(1))
+
+    def _normalize_image_count_literal(self, raw_value: str) -> int | None:
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        if text.isdigit():
+            value = int(text)
+            return value if 1 <= value <= 10 else None
+        value = self._CHINESE_IMAGE_COUNT_MAP.get(text)
+        if value is None:
+            return None
+        return value if 1 <= value <= 10 else None
+
+    def _normalize_locked_state(
+        self,
+        *,
+        stage: str,
+        requested_locked: bool,
+        state: dict[str, Any],
+        turn_payload: dict[str, Any],
+    ) -> bool:
+        if not requested_locked:
+            return False
+        normalized_stage = str(stage or "").strip().lower()
+        early_stages = {
+            "initial_understanding",
+            "painting_style",
+            "background_decor",
+            "color_mood",
+            "image_count",
+            "count_confirmation_required",
+            "style_ready",
+            "asset_ready",
+            "prompt_ready",
+            "prompt_confirmed",
+            "briefing",
+            "style_aligned",
+        }
+        if normalized_stage in early_stages:
+            return False
+        allocation_plan = turn_payload.get("allocation_plan")
+        if isinstance(allocation_plan, list) and allocation_plan:
+            return True
+        active_job_id = str(turn_payload.get("active_job_id") or state.get("active_job_id") or "").strip()
+        if active_job_id:
+            return True
+        return requested_locked
 
     def suggest_painting_style(
         self,
@@ -431,6 +614,9 @@ class InspirationService(InspirationFlowMixin):
             "image_count": state.get("image_count"),
         }
 
+    def recommend_city_content_combos(self, *, session_id: str, limit: int = 2) -> dict[str, Any]:
+        return super().recommend_city_content_combos(session_id=session_id, limit=limit)
+
     def allocate_assets_to_images(self, *, session_id: str, user_hint: str) -> list[dict[str, Any]]:
         session = self.session_repo.get(session_id)
         if not session:
@@ -452,11 +638,21 @@ class InspirationService(InspirationFlowMixin):
             "status": "saved",
         }
 
-    def generate_images(self, *, session_id: str) -> dict[str, Any]:
+    def generate_images(self, *, session_id: str, draft_state: dict[str, Any] | None = None) -> dict[str, Any]:
         session = self.session_repo.get(session_id)
         if not session:
             raise not_found("会话", session_id)
         state = self._ensure_state(session_id)
+        if isinstance(draft_state, dict) and draft_state:
+            for key in ("allocation_plan", "style_prompt", "image_count", "style_payload", "draft_style_id"):
+                value = draft_state.get(key)
+                if key == "allocation_plan" and isinstance(value, list) and value:
+                    state["allocation_plan"] = self._mark_allocation_plan_confirmed(value)
+                elif key == "style_payload" and isinstance(value, dict):
+                    state["style_payload"] = self.style_service._normalize_style_payload(value)
+                elif key in draft_state and value is not None:
+                    state[key] = value
+            state["updated_at"] = now_iso(); self.inspiration_repo.upsert_state(state); state = self._ensure_state(session_id)
         if not self.generation_worker:
             raise DomainError(code="E-1099", message="生成 Worker 不可用", status_code=500)
         existing_job_id = str(state.get("active_job_id") or "").strip()
@@ -469,6 +665,9 @@ class InspirationService(InspirationFlowMixin):
                     "already_running": True,
                 }
         allocation_plan = state.get("allocation_plan")
+        if isinstance(allocation_plan, list) and allocation_plan:
+            allocation_plan = self._mark_allocation_plan_confirmed(allocation_plan)
+            state["allocation_plan"] = allocation_plan
         if not isinstance(allocation_plan, list) or not allocation_plan:
             raise DomainError(code="E-1099", message="当前草案还没有可生成的分图规划", status_code=400)
         style_profile_id = self._ensure_draft_style_profile(session, state)
@@ -624,6 +823,8 @@ class InspirationService(InspirationFlowMixin):
                     usage_type=usage_type,
                 )
             )
+        if videos:
+            self.asset_service.ensure_video_upload_ready(session_id)
         for video in videos:
             video_name = video.filename or "upload.mp4"
             video_suffix = Path(video_name).suffix or ".mp4"
@@ -670,173 +871,4 @@ class InspirationService(InspirationFlowMixin):
             "usage_type": usage_type,
         }
         return attachment
-
-    def _generate_style_prompt(
-        self,
-        session: dict[str, Any],
-        state: dict[str, Any],
-        feedback: str,
-    ) -> str:
-        style_payload = self._build_style_payload(state)
-        image_count = state.get("image_count") or 1
-        style_text = self._format_style_payload_text(style_payload)
-        requirement_hint = self._build_prompt_requirement_hint(session["id"], feedback, state=state)
-        context_prefix = (
-            f"张数：{image_count}；"
-            f"风格参数：{style_text}；修订意见：{feedback or '无'}；"
-            f"用户硬性要求：{requirement_hint}。"
-        )
-        split_requirement = self._build_split_prompt_requirement(image_count)
-        session_image_urls = self._collect_session_image_asset_urls(session["id"])
-        if session_image_urls:
-            model_text = self._call_vision_model_with_retry(
-                session_id=session["id"],
-                system_prompt=STYLE_PROMPT_SYSTEM_PROMPT,
-                user_prompt=f"{context_prefix}{split_requirement}",
-                image_urls=session_image_urls,
-                strict_json=False,
-            )
-        else:
-            model_text = self._call_text_model_with_retry(
-                session_id=session["id"],
-                system_prompt=STYLE_PROMPT_SYSTEM_PROMPT,
-                user_prompt=f"{context_prefix}{split_requirement}",
-                strict_json=False,
-            )
-        normalized_text = self._normalize_generated_prompt(model_text, image_count=image_count)
-        if normalized_text:
-            return normalized_text
-        if session_image_urls:
-            retry_text = self._call_vision_model_with_retry(
-                session_id=session["id"],
-                system_prompt=STYLE_PROMPT_RETRY_SYSTEM_PROMPT,
-                user_prompt=f"请把下面需求改写成母提示词正文：{context_prefix}{split_requirement}",
-                image_urls=session_image_urls,
-                strict_json=False,
-            )
-        else:
-            retry_text = self._call_text_model_with_retry(
-                session_id=session["id"],
-                system_prompt=STYLE_PROMPT_RETRY_SYSTEM_PROMPT,
-                user_prompt=f"请把下面需求改写成母提示词正文：{context_prefix}{split_requirement}",
-                strict_json=False,
-            )
-        normalized_retry_text = self._normalize_generated_prompt(retry_text, image_count=image_count)
-        if normalized_retry_text:
-            return normalized_retry_text
-        raise DomainError(code="E-1004", message="模型输出格式异常，请重试", status_code=503)
-
-    def _build_prompt_requirement_hint(
-        self,
-        session_id: str,
-        feedback: str,
-        state: dict[str, Any] | None = None,
-    ) -> str:
-        feedback_text = feedback.strip()
-        parts: list[str] = []
-        if feedback_text:
-            parts.append(f"本轮补充：{feedback_text.replace('\n', ' ').strip()}")
-        recent_context = self._collect_recent_user_context(session_id, limit=8)
-        if recent_context:
-            parts.append(f"历史需求：{recent_context.replace('\n', ' ').strip()}")
-        if parts:
-            return "；".join(parts)[:420]
-        return "无"
-
-    def _build_split_prompt_requirement(self, image_count: int) -> str:
-        if image_count <= 1:
-            return "请输出 1 段提示词，并以“生成一张”开头。"
-        return (
-            f"请严格输出 {image_count} 段分图提示词。"
-            "每段都必须以“生成一张”开头，且各段分别描述不同图的主体与重点。"
-            "禁止写“生成两张/生成三张/一次生成多张”。"
-        )
-
-    def _normalize_generated_prompt(self, model_text: str, *, image_count: int) -> str:
-        prompt_text = model_text.strip()
-        if not prompt_text:
-            return ""
-        if prompt_text.startswith("{") and prompt_text.endswith("}"):
-            return ""
-        if prompt_text.startswith("```"):
-            lines = [line for line in prompt_text.splitlines() if not line.strip().startswith("```")]
-            prompt_text = "\n".join(lines).strip()
-        if not prompt_text:
-            return ""
-        if self._looks_like_internal_parameter_dump(prompt_text):
-            return ""
-        if not self._validate_split_prompt_format(prompt_text, image_count=image_count):
-            return ""
-        return prompt_text
-
-    def _validate_split_prompt_format(self, prompt_text: str, *, image_count: int) -> bool:
-        if image_count <= 1:
-            return True
-        compact = prompt_text.replace(" ", "")
-        multi_pattern = re.compile(r"生成[两二三四五六七八九十\d]+张")
-        if multi_pattern.search(compact) or "一次生成多张" in compact:
-            return False
-        lines = [line.strip(" -•\t") for line in prompt_text.splitlines() if line.strip()]
-        one_image_lines = [line for line in lines if line.startswith("生成一张")]
-        return len(one_image_lines) >= image_count
-
-    def _looks_like_internal_parameter_dump(self, text: str) -> bool:
-        markers = ("风格参数", "修订意见", "prompt_prefix", "style_payload")
-        if any(marker in text for marker in markers):
-            return True
-        return False
-
-    def _call_text_model_with_retry(
-        self,
-        *,
-        session_id: str,
-        system_prompt: str,
-        user_prompt: str,
-        strict_json: bool,
-    ) -> str:
-        provider, model_name = self.style_service._resolve_text_model_provider()
-        last_error: StyleFallbackError | None = None
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                return self.style_service._call_text_model(
-                    provider,
-                    model_name,
-                    system_prompt,
-                    user_prompt,
-                    strict_json=strict_json,
-                )
-            except StyleFallbackError as error:
-                last_error = error
-                retryable = self._is_retryable_model_error(error)
-                logger.warning(
-                    "文本模型调用失败: session_id=%s attempt=%s reason=%s detail=%s retryable=%s",
-                    session_id,
-                    attempt + 1,
-                    error.reason,
-                    error.detail,
-                    retryable,
-                )
-                if attempt == max_attempts - 1 or not retryable:
-                    break
-        raise DomainError(
-            code="E-1004",
-            message=self.style_service.build_user_facing_upstream_message(
-                last_error or StyleFallbackError("unknown", "模型服务调用失败")
-            ),
-            status_code=503,
-            details={"reason": last_error.reason if last_error else "unknown"},
-        )
-
-    def _is_retryable_model_error(self, error: StyleFallbackError) -> bool:
-        retryable_reasons = {
-            "upstream_timeout_or_network",
-            "upstream_http_error",
-            "upstream_invalid_json",
-            "upstream_invalid_payload",
-            "upstream_empty_text",
-            "protocol_both_failed",
-        }
-        return error.reason in retryable_reasons
-
 

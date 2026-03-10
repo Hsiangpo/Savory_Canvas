@@ -171,9 +171,12 @@ CREATE TABLE IF NOT EXISTS model_routing_config (
   image_model_name TEXT NOT NULL,
   text_model_provider_id TEXT NOT NULL,
   text_model_name TEXT NOT NULL,
+  transcript_model_provider_id TEXT,
+  transcript_model_name TEXT,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (image_model_provider_id) REFERENCES provider_config(id) ON DELETE CASCADE,
-  FOREIGN KEY (text_model_provider_id) REFERENCES provider_config(id) ON DELETE CASCADE
+  FOREIGN KEY (text_model_provider_id) REFERENCES provider_config(id) ON DELETE CASCADE,
+  FOREIGN KEY (transcript_model_provider_id) REFERENCES provider_config(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_asset_session_created ON asset(session_id, created_at);

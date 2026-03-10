@@ -15,7 +15,7 @@ class InspirationStyleSaveMixin:
         return self.style_repo.create(
             {
                 "id": new_id(),
-                "session_id": session["id"],
+                "session_id": None,
                 "name": style_name,
                 "style_payload": style_payload,
                 "is_builtin": False,

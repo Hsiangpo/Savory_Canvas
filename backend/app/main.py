@@ -100,7 +100,7 @@ def create_app() -> FastAPI:
     model_service = ModelService(config_repo=config_repo, provider_repo=provider_repo)
     provider_service = ProviderService(provider_repo=provider_repo)
 
-    transcript_worker = TranscriptWorker(asset_repo=asset_repo)
+    transcript_worker = TranscriptWorker(asset_repo=asset_repo, storage_base_dir=storage.base_dir)
     generation_worker = GenerationWorker(
         job_repo=job_repo,
         asset_repo=asset_repo,
@@ -122,6 +122,7 @@ def create_app() -> FastAPI:
     transcript_service = TranscriptService(
         asset_repo=asset_repo,
         session_repo=session_repo,
+        model_service=model_service,
         worker=transcript_worker,
     )
     session_service = SessionService(

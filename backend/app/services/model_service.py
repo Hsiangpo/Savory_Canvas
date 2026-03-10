@@ -36,34 +36,62 @@ class ModelService:
             raise DomainError(code="E-1006", message="请先完成模型设置", status_code=400)
         return routing
 
+    def require_transcript_target(self) -> tuple[dict[str, Any], str]:
+        routing = self.require_routing()
+        transcript_ref = routing.get("transcript_model") or {}
+        provider_id = str(transcript_ref.get("provider_id") or "").strip()
+        model_name = str(transcript_ref.get("model_name") or "").strip()
+        if not provider_id or not model_name:
+            raise DomainError(code="E-1006", message="请先完成模型设置", status_code=400)
+        provider = self._require_enabled_provider(provider_id, "转写")
+        models = self.fetch_provider_models(provider)
+        transcript_model = self._find_model(models, model_name)
+        if not transcript_model:
+            raise DomainError(code="E-1006", message="转写模型不存在", status_code=400)
+        if "transcription" not in transcript_model["capabilities"]:
+            raise DomainError(code="E-1006", message="转写模型必须具备 transcription 能力", status_code=400)
+        return provider, transcript_model["name"]
+
     def update_routing(self, payload: dict[str, Any]) -> dict[str, Any]:
-        image_provider = self.provider_repo.get(payload["image_model"]["provider_id"])
-        text_provider = self.provider_repo.get(payload["text_model"]["provider_id"])
+        image_provider = self._require_enabled_provider(payload["image_model"]["provider_id"], "图片")
+        text_provider = self._require_enabled_provider(payload["text_model"]["provider_id"], "文字")
+        transcript_provider = self._require_enabled_provider(payload["transcript_model"]["provider_id"], "转写")
 
-        if not image_provider or not image_provider["enabled"]:
-            raise DomainError(code="E-1006", message="图片模型提供商不可用", status_code=400)
-        if not text_provider or not text_provider["enabled"]:
-            raise DomainError(code="E-1006", message="文字模型提供商不可用", status_code=400)
+        provider_models: dict[str, list[dict[str, Any]]] = {}
 
-        image_models = self.fetch_provider_models(image_provider)
-        if image_provider["id"] == text_provider["id"]:
-            text_models = image_models
-        else:
-            text_models = self.fetch_provider_models(text_provider)
+        def models_for(provider: dict[str, Any]) -> list[dict[str, Any]]:
+            provider_id = provider["id"]
+            if provider_id not in provider_models:
+                provider_models[provider_id] = self.fetch_provider_models(provider)
+            return provider_models[provider_id]
+
+        image_models = models_for(image_provider)
+        text_models = models_for(text_provider)
+        transcript_models = models_for(transcript_provider)
 
         image_model = self._find_model(image_models, payload["image_model"]["model_name"])
         text_model = self._find_model(text_models, payload["text_model"]["model_name"])
+        transcript_model = self._find_model(transcript_models, payload["transcript_model"]["model_name"])
 
         if not image_model:
             raise DomainError(code="E-1006", message="图片模型不存在", status_code=400)
         if not text_model:
             raise DomainError(code="E-1006", message="文字模型不存在", status_code=400)
+        if not transcript_model:
+            raise DomainError(code="E-1006", message="转写模型不存在", status_code=400)
         if "image_generation" not in image_model["capabilities"]:
             raise DomainError(code="E-1006", message="图片模型必须具备 image_generation 能力", status_code=400)
         if "text_generation" not in text_model["capabilities"]:
             raise DomainError(code="E-1006", message="文字模型必须具备 text_generation 能力", status_code=400)
+        if "transcription" not in transcript_model["capabilities"]:
+            raise DomainError(code="E-1006", message="转写模型必须具备 transcription 能力", status_code=400)
 
-        return self.config_repo.upsert_model_routing(payload, updated_at=now_iso())
+        normalized_payload = {
+            "image_model": {"provider_id": image_provider["id"], "model_name": image_model["name"]},
+            "text_model": {"provider_id": text_provider["id"], "model_name": text_model["name"]},
+            "transcript_model": {"provider_id": transcript_provider["id"], "model_name": transcript_model["name"]},
+        }
+        return self.config_repo.upsert_model_routing(normalized_payload, updated_at=now_iso())
 
     def fetch_provider_models(self, provider: dict[str, Any]) -> list[dict[str, Any]]:
         endpoints = self._build_model_list_endpoints(provider["base_url"])
@@ -118,6 +146,12 @@ class ModelService:
             return self._provider_model_cache[provider_id]
         raise last_error or DomainError(code="E-1006", message="上游模型列表获取失败", status_code=400)
 
+    def _require_enabled_provider(self, provider_id: str, label: str) -> dict[str, Any]:
+        provider = self.provider_repo.get(provider_id)
+        if not provider or not provider["enabled"]:
+            raise DomainError(code="E-1006", message=f"{label}模型提供商不可用", status_code=400)
+        return provider
+
     def _build_model_list_endpoints(self, base_url: str) -> list[str]:
         normalized_base_url = base_url.strip().rstrip("/")
         if not normalized_base_url:
@@ -164,6 +198,8 @@ class ModelService:
         lowered = model_name.lower()
         if self._is_image_generation_model(lowered):
             return ["image_generation"]
+        if self._is_transcription_model(lowered):
+            return ["transcription"]
 
         vision_markers = {
             "vision",
@@ -225,9 +261,23 @@ class ModelService:
             return True
         return False
 
+    def _is_transcription_model(self, lowered_model_name: str) -> bool:
+        transcription_markers = {
+            "whisper",
+            "transcribe",
+            "transcription",
+            "speech-to-text",
+            "speech_to_text",
+            "audio-transcription",
+            "audio_transcription",
+            "stt",
+            "asr",
+        }
+        return any(marker in lowered_model_name for marker in transcription_markers)
+
     def _merge_capabilities(self, upstream_capabilities: list[str], inferred_capabilities: list[str]) -> list[str]:
         merged = set(upstream_capabilities) | set(inferred_capabilities)
-        order = ["image_generation", "text_generation", "vision"]
+        order = ["image_generation", "text_generation", "vision", "transcription"]
         return [name for name in order if name in merged]
 
     def _extract_capabilities_from_upstream(self, item: dict[str, Any]) -> list[str]:
@@ -251,6 +301,8 @@ class ModelService:
             raw_values.append("text_generation")
         if item.get("supports_vision") is True:
             raw_values.append("vision")
+        if item.get("supports_transcription") is True:
+            raw_values.append("transcription")
 
         token_set = self._normalize_capability_tokens(raw_values)
         if not token_set:
@@ -275,6 +327,20 @@ class ModelService:
             ),
             ("text_generation", ("text_generation", "text-generation", "text", "chat", "completion", "completions", "responses")),
             ("vision", ("vision", "multimodal", "image_understanding", "vl")),
+            (
+                "transcription",
+                (
+                    "transcription",
+                    "transcribe",
+                    "audio_transcription",
+                    "audio_transcriptions",
+                    "speech_to_text",
+                    "speech_recognition",
+                    "stt",
+                    "asr",
+                    "whisper",
+                ),
+            ),
         ]
 
         capabilities: list[str] = []

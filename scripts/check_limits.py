@@ -11,6 +11,21 @@ MAX_LINES_PER_FILE = 1000
 MAX_LINES_PER_FUNC = 200
 MAX_FILES_PER_DIR = 10
 
+
+def configure_console_output() -> None:
+    stream = getattr(sys, "stdout", None)
+    if stream is not None and hasattr(stream, "reconfigure"):
+        try:
+            stream.reconfigure(errors="replace")
+        except (OSError, ValueError):
+            pass
+    err_stream = getattr(sys, "stderr", None)
+    if err_stream is not None and hasattr(err_stream, "reconfigure"):
+        try:
+            err_stream.reconfigure(errors="replace")
+        except (OSError, ValueError):
+            pass
+
 def check_file_limits(file_path: str) -> list[str]:
     errors = []
     
@@ -44,6 +59,7 @@ def check_file_limits(file_path: str) -> list[str]:
     return errors
 
 def main():
+    configure_console_output()
     backend_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backend')
     
     if not os.path.exists(backend_dir):
